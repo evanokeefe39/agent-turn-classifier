@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Turn Classifier — from session logs to a small, fast labelling model</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --dim:#8b949e; --line:#30363d;
+    --accent:#58a6ff; --good:#3fb950; --warn:#d29922; --bad:#f85149; --purple:#bc8cff;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:var(--sans)}
+  .deck{height:100%;overflow:hidden;position:relative}
+  .slide{
+    position:absolute;inset:0;padding:46px 68px 70px;overflow-y:auto;
+    opacity:0;visibility:hidden;transform:translateY(8px);
+    transition:opacity .22s ease,transform .22s ease,visibility .22s;
+    /* Flex column so a .grid can stretch to fill the height. Content still
+       flows from the top (no centre) and overflow scrolls normally. */
+    display:flex;flex-direction:column;
+  }
+  .slide.active{opacity:1;visibility:visible;transform:none}
+  .slide.title-slide{display:flex;flex-direction:column;justify-content:center;height:100%}
+  /* Denser slides: let cards and tables take the vertical room rather than
+     leaving a dead band above the footer. */
+  .slide > .grid,.slide > .scr{flex:1 1 auto}
+  .slide > .grid > .card,.slide > .scr > div{display:flex;flex-direction:column}
+  .slide > .grid > .card > p:last-child,.slide > .scr > div > p:last-child{margin-bottom:0}
+  .tabbar{
+    position:fixed;top:0;left:0;right:0;height:52px;z-index:10;
+    display:flex;align-items:stretch;gap:0;
+    background:rgba(13,17,23,.97);border-bottom:1px solid var(--line);
+    backdrop-filter:blur(8px);overflow-x:auto;overflow-y:hidden;
+    scrollbar-width:none;
+  }
+  .tabbar::-webkit-scrollbar{display:none}
+  /* Fade on the right signals more tabs exist off-screen. */
+  .tabbar::after{
+    content:"";position:sticky;right:0;top:0;flex:0 0 26px;
+    background:linear-gradient(to right,rgba(13,17,23,0),rgba(13,17,23,.95));
+    pointer-events:none;
+  }
+  .tab{
+    flex:0 0 auto;display:flex;align-items:center;gap:8px;
+    padding:0 15px;border:0;background:transparent;cursor:pointer;
+    color:var(--dim);font-family:var(--sans);font-size:.83rem;
+    border-bottom:2px solid transparent;white-space:nowrap;
+    transition:color .15s,border-color .15s,background .15s;
+  }
+  .tab:hover{color:var(--ink);background:#1c2128}
+  .tab[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+  .tab .num{
+    font-family:var(--mono);font-size:.68rem;opacity:.65;
+    min-width:15px;text-align:right;
+  }
+  .tab[aria-selected="true"] .num{opacity:1}
+  .deck{margin-top:52px;height:calc(100% - 52px)}
+  .slide{padding:40px 68px 84px}
+  .footer .hint{display:none}
+  @media(max-width:900px){
+    .slide{padding:28px 22px 74px}
+    .tab{padding:0 11px;font-size:.76rem}
+    .tab .lbl{display:none}
+    .tab:first-child .lbl,.tab[aria-selected="true"] .lbl{display:inline}
+  }
+  h1{font-size:2.5rem;line-height:1.15;margin:0 0 .5rem;letter-spacing:-.02em}
+  h2{font-size:1.85rem;line-height:1.2;margin:0 0 1.1rem;letter-spacing:-.015em}
+  h2 .kicker, h1 .kicker{display:block;font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--dim);font-weight:600;margin-bottom:.45rem}
+  h3{font-size:1.02rem;margin:1.3rem 0 .5rem;color:var(--accent);font-weight:650}
+  p,li{font-size:1.02rem;line-height:1.62}
+  p{margin:.6rem 0}
+  ul{margin:.5rem 0 .5rem 1.1rem;padding:0}
+  li{margin:.34rem 0}
+  .lede{font-size:1.14rem;color:#c9d1d9;max-width:60ch}
+  .dim{color:var(--dim)}
+  .grid{display:grid;gap:16px}
+  .g2{grid-template-columns:1fr 1fr}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+  .card h4{margin:0 0 .4rem;font-size:.95rem;color:var(--ink)}
+  .card p{font-size:.92rem;margin:.3rem 0;color:#c9d1d9;line-height:1.55}
+  .tag{display:inline-block;font-family:var(--mono);font-size:.72rem;padding:2px 7px;
+    border-radius:20px;border:1px solid var(--line);color:var(--dim);margin-right:6px}
+  .scr{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:1.4rem}
+  .scr > div{border-left:3px solid var(--accent);padding:2px 0 2px 14px}
+  .scr .n{font-family:var(--mono);font-size:.7rem;letter-spacing:.14em;color:var(--dim);
+    text-transform:uppercase;display:block;margin-bottom:.25rem}
+  .scr h4{margin:0 0 .35rem;font-size:1.05rem}
+  .scr p{font-size:.92rem;margin:0;color:#c9d1d9;line-height:1.5}
+  pre{background:#010409;border:1px solid var(--line);border-radius:8px;padding:13px 15px;
+    overflow-x:auto;font-family:var(--mono);font-size:.84rem;line-height:1.55;color:#c9d1d9}
+  code{font-family:var(--mono);font-size:.88em;background:#21262d;padding:1px 5px;border-radius:4px}
+  .jargon{background:#1c2128;border-left:3px solid var(--purple);border-radius:0 8px 8px 0;
+    padding:11px 15px;margin:13px 0}
+  .jargon .t{font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--purple);font-weight:700;margin-bottom:.3rem}
+  .jargon p{margin:0;font-size:.93rem;line-height:1.55;color:#c9d1d9}
+  .flow{display:flex;align-items:stretch;gap:0;margin:1rem 0;flex-wrap:wrap}
+  .step{flex:1;min-width:132px;background:var(--panel);border:1px solid var(--line);
+    padding:12px 13px;position:relative;margin-right:16px;border-radius:8px}
+  .step:last-child{margin-right:0}
+  .step::after{content:"";position:absolute;right:-16px;top:50%;transform:translateY(-50%);
+    border-left:9px solid var(--accent);border-top:7px solid transparent;
+    border-bottom:7px solid transparent;opacity:.75}
+  .step:last-child::after{display:none}
+  .step .n{font-family:var(--mono);font-size:.66rem;color:var(--accent);letter-spacing:.1em}
+  .step h4{margin:.25rem 0 .3rem;font-size:.9rem}
+  .step p{font-size:.8rem;margin:0;color:var(--dim);line-height:1.45}
+  table{border-collapse:collapse;width:100%;margin:.9rem 0;font-size:.9rem}
+  th,td{text-align:left;padding:8px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);font-weight:600}
+  td.mono{font-family:var(--mono);font-size:.82rem}
+  .ok{color:var(--good);font-weight:600}
+  .no{color:var(--bad);font-weight:600}
+  .mid{color:var(--warn);font-weight:600}
+  .note{border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:0 8px 8px 0;
+    background:#1c1a12;padding:12px 15px;margin:14px 0}
+  .note p{margin:0;font-size:.92rem;color:#e6d9b8;line-height:1.55}
+  .note .t{font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--warn);font-weight:700;margin-bottom:.3rem}
+  .bignum{font-size:2.5rem;font-weight:700;letter-spacing:-.03em;line-height:1}
+  .bignum.s{color:var(--good)}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:15px 17px}
+  .stat .lbl{font-size:.74rem;text-transform:uppercase;letter-spacing:.1em;color:var(--dim)}
+  .stat .sub{font-size:.84rem;color:var(--dim);margin-top:.3rem}
+  .footer{position:absolute;bottom:0;left:0;right:0;height:56px;display:flex;
+    align-items:center;justify-content:space-between;padding:0 68px;
+    border-top:1px solid var(--line);background:rgba(13,17,23,.94);font-size:.78rem;
+    color:var(--dim);backdrop-filter:blur(6px)}
+  .prog{position:absolute;bottom:55px;left:0;height:2px;background:var(--accent);
+    transition:width .22s ease;z-index:5}
+  .hint{font-family:var(--mono);font-size:.72rem}
+  /* The title div is a CHILD of the section, so height:100% resolves against
+     an auto-height flex item and collapses. flex:1 makes it fill the section
+     so justify-content can centre its content. */
+  .title-slide{display:flex;flex-direction:column;justify-content:center;flex:1 1 auto;min-height:0}
+  .title-slide .meta{margin-top:2rem;color:var(--dim);font-size:.92rem;line-height:1.7}
+  strong{color:#fff;font-weight:650}
+  .vs{display:grid;grid-template-columns:1fr auto 1fr;gap:18px;align-items:center;margin:1.1rem 0}
+  .vs .mid{align-self:center;font-family:var(--mono);font-size:.78rem;color:var(--dim)}
+  @media(max-width:900px){
+    .slide{padding:32px 26px 76px}
+    .g2,.g3,.scr{grid-template-columns:1fr}
+    .vs{grid-template-columns:1fr}
+    .footer{padding:0 26px}
+    h1{font-size:1.9rem} h2{font-size:1.45rem}
+  }
+</style>
+</head>
+<body>
+<nav class="tabbar" id="tabbar" role="tablist" aria-label="Slides"></nav>
+<div class="deck" id="deck">
+
+<!-- 1 ───────────────────────────────────────────── -->
+<section class="slide active">
+  <div class="title-slide">
+    <span class="tag">agent-turn-classifier</span>
+    <h1><span class="kicker">Overview</span>What did you actually do<br>in that session?</h1>
+    <p class="lede">Turning thousands of AI-agent session logs into a small model that labels every turn with the work it performed — running on a laptop CPU, with no API calls at prediction time.</p>
+    <div class="meta">
+      An explainer for data engineers &nbsp;·&nbsp; no ML-evaluation background assumed<br>
+      <span class="dim">Click a tab above to jump to any slide. Every abbreviation is explained in a purple box.</span>
+    </div>
+  </div>
+</section>
+
+<!-- 2 ───────────────────────────────────────────── -->
+<section class="slide">
+  <h2><span class="kicker">Situation</span>We generate the data, and throw it away</h2>
+  <p class="lede">Every coding session with an AI agent writes a detailed transcript: what you asked, what tools ran, what the agent replied, how long it took. It is one of the richest records of real engineering work in existence.</p>
+  <div class="grid g3" style="margin-top:1.6rem">
+    <div class="stat"><div class="bignum">323</div><div class="lbl">sessions</div><div class="sub">on one laptop, in one agent</div></div>
+    <div class="stat"><div class="bignum">4,459</div><div class="lbl">user turns</div><div class="sub">each a task, a question, or a redirection</div></div>
+    <div class="stat"><div class="bignum">36</div><div class="lbl">projects</div><div class="sub">data engineering, research, tooling</div></div>
+  </div>
+  <div class="jargon">
+    <div class="t">What is a "turn"?</div>
+    <p>One message from you that starts a piece of work. You write <em>"add the salesforce source, first time connecting it"</em> — that is one turn. Everything the agent does in response belongs to that turn. This deck is about labelling those turns.</p>
+  </div>
+  <p>The transcripts are already on disk, in an open format. Nothing needs to be instrumented. The value is sitting there unread — because reading it means someone has to say, of every one of those 4,459 turns, <em>what kind of work was that?</em></p>
+</section>
+
+<!-- 3 ───────────────────────────────────────────── -->
+<section class="slide">
+  <h2><span class="kicker">Complication</span>The obvious way to label them does not scale</h2>
+  <p class="lede">You want every turn tagged with a workflow — "connect a new source", "fix bad data", "refactor a slow job". The taxonomy is open-ended: the shipped example defines six workflows across four domains, and a real deployment declares its own.</p>
+  <div class="vs">
+    <div class="card">
+      <h4>Option A — keyword matching</h4>
+      <p><code>if "refactor" in text or "slow" in text: ...</code></p>
+      <p class="no">Breaks immediately.</p>
+      <p>"it's getting hard to maintain" is a refactor. "make this faster" is a refactor. Neither says "refactor". A regex cannot read intent, and one bad pattern silently mislabels thousands of rows.</p>
+    </div>
+    <div class="mid">vs</div>
+    <div class="card">
+      <h4>Option B — ask a large language model</h4>
+      <p class="dim">Send all 4,459 turns to GPT-class API, get a label back.</p>
+      <p class="mid">Works — but scaling hurts.</p>
+      <p>Cost, latency, rate limits, and a hard dependency: your historical data now needs a live API call to be readable. Re-run the corpus and the labels can change.</p>
+    </div>
+  </div>
+  <h3>The tension we actually have</h3>
+  <p>We want the accuracy of a large model, but the <strong>speed, cost and independence</strong> of a local script. Those have felt like a trade-off. The rest of this deck is how we break it.</p>
+</section>
+
+<!-- 4 ───────────────────────────────────────────── -->
+<section class="slide">
+  <h2><span class="kicker">Resolution</span>Use the big model to teach a small one</h2>
+  <p class="lede">This is the core trick, and it is one idea:</p>
+  <div class="flow">
+    <div class="step"><span class="n">TEACHER</span><h4>Big model labels</h4><p>Expensive, slow, brilliant. Sends each turn to a frontier LLM and gets a workflow back.</p></div>
+    <div class="step"><span class="n">STUDENT</span><h4>Small model learns</h4><p>Trained to copy the teacher's behaviour. Tiny, fast, CPU-only — no API at prediction time.</p></div>
+    <div class="step"><span class="n">RESULT</span><h4>Ship the student</h4><p>You paid once, offline. Now labelling 4,459 turns takes seconds, for free, forever.</p></div>
+  </div>
+  <div class="jargon">
+    <div class="t">"Distillation" — the industry term</div>
+    <p>Training a small model to imitate a large one. The large one is the <strong>teacher</strong>; the small one is the <strong>student</strong>. The teacher never runs again once training is done. Think of it as: the teacher writes the answers, the student learns to produce them alone.</p>
+  </div>
+  <div class="jargon">
+    <div class="t">"Inference" — what you do with a trained model</div>
+    <p>Using a model to get a prediction. Training is the learning phase; inference is every time you ask it something afterwards. The whole point here is that <strong>inference needs no API call</strong> — it runs as ordinary Python on your machine.</p>
+  </div>
+</section>
+
+<!-- 5 ───────────────────────────────────────────── -->
+<section class="slide">
+  <h2><span class="kicker">Key concepts</span>The five things you need to know</h2>
+  <div class="grid g2">
+    <div class="card"><h4>1 · Text becomes numbers (embeddings)</h4><p>A turn like <em>"wire up the amplitude feed"</em> is converted into a list of ~400 numbers that captures its <strong>meaning</strong>. Similar work produces similar numbers. This is the only "magic" step, and it is a standard off-the-shelf component.</p></div>
+    <div class="card"><h4>2 · A tiny classifier on top</h4><p>Once turns are numbers, labelling them is ordinary supervised learning — the same shape as logistic regression you may have used. It learns a boundary between "connect a source" and "fix bad data".</p></div>
+    <div class="card"><h4>3 · A held-out set (the exam)</h4><p>You never test a model on what it trained on — it would just be reciting. Data is split: the model studies one part, is graded on another it has never seen.</p></div>
+    <div class="card"><h4>4 · Splitting by session, not by turn</h4><p>Turns inside one session are all about the same thing. Split them randomly and near-identical turns land on both sides — the model looks brilliant because it has effectively seen the exam. So we split so that <strong>whole sessions</strong> go to one side only.</p></div>
+    <div class="card"><h4>5 · Macro-F1 — the score</h4><p>A single number for "how good were the labels", from 0 to 1. Higher is better. It is the score we measure everything else against.</p></div>
+    <div class="card"><h4>6 · A "floor" you must not cross</h4><p>Some turns are not work at all — <em>"thanks"</em>, a stray question. The model must be allowed to say <strong>"not a work turn"</strong> rather than force a wrong label onto it.</p></div>
+  </div>
+</section>
+
+<!-- 6 ───────────────────────────────────────────── -->
+<section class="slide">
+  <h2><span class="kicker">Concept detail</span>Macro-F1, without the maths</h2>
+  <p class="lede">Why not just use "percentage correct"? Because that measure lies when one class dominates.</p>
+  <div class="vs">
+    <div class="card">
+      <h4>Accuracy (percentage correct)</h4>
+      <p>If 90% of turns are "add a source", a model that <strong>always</strong> says "add a source" scores 90% and has learned nothing.</p>
+      <p class="no">Rewards laziness.</p>
+    </div>
+    <div class="mid">vs</div>
+    <div class="card">
+      <h4>Macro-F1</h4>
+      <p>Score each workflow separately, then <strong>average the scores equally</strong>. A rare workflow counts as much as a common one.</p>
+      <p class="ok">A model must be good at everything.</p>
+    </div>
+  </div>
+  <div class="jargon">
+    <div class="t">F1 — the jargon</div>
+    <p>A blend of two questions: <em>of the turns I labelled "refactor", how many really were?</em> (precision) and <em>of the turns that really were refactors, how many did I find?</em> (recall). F1 combines them into one number, so you cannot cheat by guessing one class constantly. <strong>Macro</strong> means we average that number across classes rather than across rows.</p>
+  </div>
+  <div class="jargon">
+    <div class="t">"Class" / "label space"</div>
+    <p>The set of answers the model may choose from. Here each class is one workflow id. The model picks exactly one per turn — it cannot answer "both" or "unsure". Deciding what belongs in that set is a design decision, not a technical one.</p>
+  </div>
+</section>
+
+<!-- 7 ───────────────────────────────────────────── -->
+<section class="slide">
+  <h2><span class="kicker">Mechanism</span>The pipeline, end to end</h2>
+  <p class="lede">Six steps, each producing a file you can inspect. Nothing is hidden inside a black box.</p>
+  <table>
+    <tr><th>Step</th><th>What happens</th><th>Why it matters</th></tr>
+    <tr><td class="mono">1 read</td><td>Parse raw session transcripts into one row per turn, in a stable open format.</td><td>Raw stays untouched. Everything downstream is reproducible from it.</td></tr>
+    <tr><td class="mono">2 render</td><td>Turn into the short text the model will see — a "view".</td><td>This is what the model actually reads. Garbage here, garbage everywhere.</td></tr>
+    <tr><td class="mono">3 teacher</td><td>The big LLM labels each view.</td><td>Expensive. Happens once.</td></tr>
+    <tr><td class="mono">4 train</td><td>Small model learns to reproduce those labels.</td><td>Minutes on a CPU.</td></tr>
+    <tr><td class="mono">5 evaluate</td><td>Score it on turns from sessions it never trained on.</td><td>The only number that means anything.</td></tr>
+    <tr><td class="mono">6 export</td><td>Write a self-contained folder: encoder, weights, manifest.</td><td>Runs anywhere with Python. No torch, no API, no network.</td></tr>
+  </table>
+  <div class="jargon">
+    <div class="t">"Encoder" — the term</div>
+    <p>The component that turns text into those ~400 numbers. It is trained separately and reused. In our design the <strong>same encoder is exported once</strong> and shared across every dimension we classify — you do not pay for it twice.</p>
+  </div>
+</section>
+
+<!-- 8 ───────────────────────────────────────────── -->
+<section class="slide">
+  <h2><span class="kicker">Mechanism</span>How we know the number is real</h2>
+  <p class="lede">A high score is easy to fake by accident. These four guards are what make a score believable.</p>
+  <div class="grid g2">
+    <div class="card"><h4>Session-disjoint folds</h4><p>The exam sessions are excluded from training entirely. We assert this on the folds actually used, not on our intention.</p><p class="dim">Without it, a template-like corpus scores ~1.0 and means nothing.</p></div>
+    <div class="card"><h4>Same population for both</h4><p>Teacher and student are scored over <strong>the same set of turns</strong>. If the teacher is graded over 100 turns and the student over 72, the comparison is fiction.</p></div>
+    <div class="card"><h4>Counts must add up</h4><p>We assert that skips + unplaceable + scored exactly equals the total. An arithmetic identity — but it is how we caught real bugs.</p></div>
+    <div class="card"><h4>Loud failure, never silent</h4><p>If a check cannot run, it says so. A test that passes because it matched nothing is worse than a test that fails.</p></div>
+  </div>
+  <div class="note">
+    <div class="t">This is the part most people skip</div>
+    <p>An evaluation framework is not bureaucracy. Every one of these four guards caught a real bug in our own code — a denominator that counted different populations, a label that was trainable when it should not have been, and a score that was comparing the model against its own teacher rather than the truth.</p>
+  </div>
+</section>
+
+<!-- 9 ───────────────────────────────────────────── -->
+<section class="slide">
+  <h2><span class="kicker">Nuance</span>Where this gets subtle — and where we were wrong</h2>
+  <p class="lede">Three findings from our own measurements. Two corrected our design; one is still open. We are showing them because they change the plan.</p>
+  <div class="scr">
+    <div>
+      <span class="n">Finding 1</span>
+      <h4>A "ceiling" that is not a ceiling</h4>
+      <p>The plan compares the student against the teacher's score and asks "are you within 0.10?". But if the <strong>teacher is worse than the student</strong>, that test passes automatically and measures nothing. Our fixture hit exactly this: student 0.98 against a teacher of 0.71. The gate said "pass". It should not have.</p>
+    </div>
+    <div>
+      <span class="n">Finding 2</span>
+      <h4>The score kept moving — and it was not leakage</h4>
+      <p>Our score was suspiciously high, so we assumed data was leaking across the split. We measured it properly: it was not. Scored the same way both times, the model got 0.98 either way, and <strong>all 72 nearest neighbours were same-workflow</strong>. The truth was simpler — the test fixture was just too easy.</p>
+    </div>
+    <div>
+      <span class="n">Finding 3</span>
+      <h4>Real data did not look like we assumed</h4>
+      <p>Our own adapter, written from the existing pipeline's queries, read the wrong fields — the schema nests them differently. It silently labelled <strong>every single turn</strong> as "other". It looked like it worked. It had never worked.</p>
+    </div>
+  </div>
+  <div class="note">
+    <div class="t">The pattern worth remembering</div>
+    <p>Every one of these failed <em>quietly</em>. None raised an error. They produced plausible numbers. That is why we build assertions before we trust a metric — and why we would rather report "this cannot be measured" than a number that keeps changing.</p>
+  </div>
+</section>
+
+<!-- 10 ──────────────────────────────────────────── -->
+<section class="slide">
+  <h2><span class="kicker">Nuance</span>What we are deliberately not doing</h2>
+  <div class="grid g2">
+    <div class="card">
+      <h4>The teacher is not the truth</h4>
+      <p>We train on what a large model said, then grade the student against human-confirmed labels. If the teacher is wrong, the student inherits it — so we measure the teacher's own accuracy rather than assuming it.</p>
+    </div>
+    <div class="card">
+      <h4>We do not tune the fixture to look good</h4>
+      <p>The synthetic test data is there to prove the <em>plumbing works</em>. When it proved too easy to measure quality, we said so in the README instead of editing it until the number looked respectable.</p>
+    </div>
+    <div class="card">
+      <h4>We do not guess at intent</h4>
+      <p>When a turn does not fit any declared workflow, the model returns "unplaceable" rather than forcing the nearest match. Those cases are then reviewed and either promoted to a real workflow or discarded.</p>
+    </div>
+    <div class="card">
+      <h4>We do not hide the gaps</h4>
+      <p>Where a claim is unverified — the training run has never executed end to end, for example — the file says so plainly. A stated unknown is useful; a silent assumption is a defect waiting to surface.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 11 ──────────────────────────────────────────── -->
+<section class="slide">
+  <h2><span class="kicker">Expected impact</span>What this changes day to day</h2>
+  <div class="grid g2" style="margin-bottom:1.2rem">
+    <div class="stat"><div class="lbl">Before</div><p style="margin:.5rem 0 0;font-size:.95rem">To answer "what have I actually been working on?", you read logs by hand or send them to an API. Costly, slow, and the answer changes each time you re-run it.</p></div>
+    <div class="stat"><div class="lbl">After</div><p style="margin:.5rem 0 0;font-size:.95rem">One command labels every turn. Runs in seconds on a CPU. Offline. Identical results every run. Raw transcripts untouched throughout.</p></div>
+  </div>
+  <h3>Concretely</h3>
+  <ul>
+    <li><strong>You can see your own work patterns</strong> — time by workflow, which projects needed the most cleanup, where you got interrupted.</li>
+    <li><strong>It works on a laptop</strong> — no GPU, no API key, no network. The whole model is a folder you can copy.</li>
+    <li><strong>It survives model churn</strong> — the API vendors change and deprecate; the exported classifier keeps working unchanged.</li>
+    <li><strong>It transfers to other agents</strong> — the same pipeline reads a second agent's transcripts; only a small adapter differs.</li>
+    <li><strong>It is auditable</strong> — every prediction can be traced back to the exact turn and view it came from.</li>
+  </ul>
+  <div class="jargon">
+    <div class="t">"Dimension" — how we get more than labels</div>
+    <p>The same pipeline classifies more than one thing about a turn: which <strong>workflow</strong>, and (separately) how much <strong>domain knowledge</strong> it assumed, on an ordered scale. Each is a "dimension" with its own small model, sharing one encoder. Adding a dimension is a config change, not a rewrite.</p>
+  </div>
+</section>
+
+<!-- 12 ──────────────────────────────────────────── -->
+<section class="slide">
+  <h2><span class="kicker">Status</span>Where we actually are</h2>
+  <p class="lede">Honest accounting. A tool that overstates its readiness is a tool nobody can rely on.</p>
+  <table>
+    <tr><th>Piece</th><th>State</th><th>Evidence</th></tr>
+    <tr><td>Full pipeline runs offline, CPU only</td><td class="ok">Working</td><td class="mono">~30s end to end, no API key</td></tr>
+    <tr><td>Real teacher produces usable labels</td><td class="ok">Verified</td><td class="mono">20/20 against confirmed labels</td></tr>
+    <tr><td>Reads real agent transcripts</td><td class="ok">Verified</td><td class="mono">byte-exact on a 5.3MB session</td></tr>
+    <tr><td>Measure whether distillation works</td><td class="no">Not yet</td><td class="mono">test fixture too easy to tell</td></tr>
+    <tr><td>GPU training arm</td><td class="mid">Written, unrun</td><td class="mono">API verified; loop never executed</td></tr>
+    <tr><td>Ship rule for picking a model</td><td class="mid">Needs a decision</td><td class="mono">ceiling clause described above</td></tr>
+  </table>
+  <div class="note">
+    <div class="t">The honest summary</div>
+    <p>The plumbing is proven end to end. What is <strong>not</strong> proven is that distillation beats the alternatives on real data — because no corpus we have yet is hard enough to tell the difference. That is the next measurement, and it needs real transcripts, not synthetic ones.</p>
+  </div>
+</section>
+
+<!-- 13 ──────────────────────────────────────────── -->
+<section class="slide">
+  <h2><span class="kicker">Glossary</span>Every term in one place</h2>
+  <table>
+    <tr><th>Term</th><th>Plain meaning</th></tr>
+    <tr><td><strong>Turn</strong></td><td>One message from you that starts a piece of work.</td></tr>
+    <tr><td><strong>Workflow</strong></td><td>A named kind of work — "connect a source", "fix bad data". You declare your own in a config file; the shipped example defines six.</td></tr>
+    <tr><td><strong>Class / label space</strong></td><td>The set of answers a model may choose from. It picks exactly one.</td></tr>
+    <tr><td><strong>Encoder / embedding</strong></td><td>Turns text into numbers that preserve meaning. Similar work → similar numbers.</td></tr>
+    <tr><td><strong>Teacher / student</strong></td><td>The big model that labels; the small model that learns to copy it.</td></tr>
+    <tr><td><strong>Distillation</strong></td><td>Training a small model to imitate a large one.</td></tr>
+    <tr><td><strong>Inference</strong></td><td>Using a trained model. Here: free, local, no API call.</td></tr>
+    <tr><td><strong>Macro-F1</strong></td><td>A 0–1 score that weights every class equally, unlike plain accuracy.</td></tr>
+    <tr><td><strong>Held-out set</strong></td><td>Data kept back from training so you can grade the model honestly.</td></tr>
+    <tr><td><strong>Session-disjoint split</strong></td><td>Splitting so whole sessions go to one side only, preventing near-duplicate leakage.</td></tr>
+    <tr><td><strong>Leakage</strong></td><td>Accidentally letting the model see the exam. Produces flattering, meaningless scores.</td></tr>
+    <tr><td><strong>Floor / ceiling</strong></td><td>The worst and best scores you would accept. A "ceiling" should bound what is achievable.</td></tr>
+    <tr><td><strong>Abstention</strong></td><td>Letting the model answer "not a work turn" instead of forcing a wrong label.</td></tr>
+    <tr><td><strong>ONNX</strong></td><td>An open file format for trained models. Exports once, runs anywhere, no heavy dependencies.</td></tr>
+  </table>
+</section>
+
+<!-- 14 ──────────────────────────────────────────── -->
+<section class="slide">
+  <div class="title-slide">
+    <h1><span class="kicker">Summary</span>The one-line version</h1>
+    <p class="lede" style="max-width:52ch;font-size:1.24rem">Your agent already writes down everything you do. This turns those logs into a small, local, auditable model that can say <em>what kind of work</em> each piece of it was — and it never phones home.</p>
+    <div class="meta">
+      <strong>The principle we are designing to:</strong><br>
+      Never ship a number you cannot reproduce, and never let a check<br>
+      pass because it silently matched nothing.
+    </div>
+  </div>
+</section>
+
+</div>
+
+<div class="prog" id="prog"></div>
+<div class="footer">
+  <span>agent-turn-classifier &nbsp;·&nbsp; turn labels from session logs</span>
+  <span class="hint" id="hint">← → to navigate &nbsp;·&nbsp; <span id="cur">1</span>/<span id="tot">14</span></span>
+</div>
+
+<script>
+(function(){
+  const slides=[...document.querySelectorAll('.slide')];
+  const tabbar=document.getElementById('tabbar');
+  const prog=document.getElementById('prog'), cur=document.getElementById('cur');
+  document.getElementById('tot').textContent=slides.length;
+
+  // Derive a short label per slide. Where a slide has a kicker (Situation,
+  // Resolution, Mechanism…) that IS the label — it is already short and
+  // meaningful. Otherwise condense the heading. No second list to maintain.
+  const labels=slides.map((s,k)=>{
+    const h=s.querySelector('h1, h2');
+    if(!h) return 'Start';
+    const kick=h.querySelector('.kicker');
+    if(kick){
+      // The kicker alone — "Situation", "Resolution", "Mechanism" — is short
+      // and already meaningful. Appending heading words just forced truncation.
+      return kick.textContent.replace(/\s+/g,' ').trim();
+    }
+    const clone=h.cloneNode(true);
+    clone.querySelectorAll('br').forEach(n=>n.replaceWith(' '));
+    let t=(clone.textContent||'').replace(/\s+/g,' ').trim();
+    t=t.split(/[—:·]/)[0].trim();
+    if(t.length>18) t=t.slice(0,18).replace(/\s+\S*$/,'')+'…';
+    return t || ('Slide '+(k+1));
+  });
+
+  // Two slides share the "Mechanism" kicker and two share "Nuance". Suffix the
+  // duplicates so no two tabs read the same.
+  const seen={};
+  labels.forEach((l,k)=>{ seen[l]=(seen[l]||0)+1; });
+  const counts={};
+  labels.forEach((l,k)=>{
+    if(seen[l]>1){
+      counts[l]=(counts[l]||0)+1;
+      labels[k]=l+' '+counts[l];
+    }
+  });
+
+  const tabs=labels.map((lbl,k)=>{
+    const b=document.createElement('button');
+    b.className='tab'; b.setAttribute('role','tab');
+    b.setAttribute('aria-selected', k===0 ? 'true':'false');
+    b.innerHTML='<span class="num">'+(k+1)+'</span><span class="lbl"></span>';
+    b.querySelector('.lbl').textContent=lbl;
+    b.addEventListener('click',()=>show(k));
+    tabbar.appendChild(b);
+    return b;
+  });
+
+  let i=0;
+  function show(n){
+    i=Math.max(0,Math.min(slides.length-1,n));
+    slides.forEach((s,k)=>s.classList.toggle('active',k===i));
+    tabs.forEach((t,k)=>t.setAttribute('aria-selected', k===i?'true':'false'));
+    slides[i].scrollTop=0;
+    prog.style.width=((i+1)/slides.length*100)+'%';
+    cur.textContent=i+1;
+    // Keep the active tab visible when the bar overflows.
+    tabs[i].scrollIntoView({block:'nearest',inline:'center'});
+  }
+
+  // Keyboard stays available for presenting, but the tabs are the primary UI.
+  addEventListener('keydown',e=>{
+    if(['ArrowRight','PageDown',' '].includes(e.key)){e.preventDefault();show(i+1)}
+    else if(['ArrowLeft','PageUp'].includes(e.key)){e.preventDefault();show(i-1)}
+    else if(e.key==='Home'){e.preventDefault();show(0)}
+    else if(e.key==='End'){e.preventDefault();show(slides.length-1)}
+  });
+  show(0);
+  // Start with the bar scrolled to the first tab, so slide 1 is never hidden
+  // off-screen left after a reload.
+  tabbar.scrollLeft = 0;
+})();
+</script>
+</body>
+</html>
