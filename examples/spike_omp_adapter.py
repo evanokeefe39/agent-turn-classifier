@@ -36,7 +36,10 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-SESSIONS_ROOT = Path(os.environ.get("ATC_SESSIONS_ROOT", r"C:\Users\evano\.omp\agent\sessions"))
+# Sessions root comes from the environment. No hardcoded default: this repo is
+# public, and a fallback path would either leak a personal directory or fail
+# silently against a path that does not exist.
+SESSIONS_ROOT = Path(os.environ.get("ATC_SESSIONS_ROOT", "examples"))
 
 # The seven harness-probe / dot-dir noise directories the plan excludes. They are
 # OMP's own test scratch, not real work, and counting them inflates the corpus.
