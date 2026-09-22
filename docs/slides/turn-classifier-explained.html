@@ -6,18 +6,61 @@
 <title>Turn Classifier — from session logs to a small, fast labelling model</title>
 <style>
   :root{
-    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --dim:#8b949e; --line:#30363d;
-    --accent:#58a6ff; --good:#3fb950; --warn:#d29922; --bad:#f85149; --purple:#bc8cff;
-    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
-    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+    /* ── Ambient Noise design tokens ─────────────────────────────
+       Lifted verbatim from ambient-noise-app-v2/src/app/globals.css
+       (dark theme) so this deck and the app share ONE vocabulary.
+       globals.css also carries a runtime HSL theme-switching layer
+       (:root --background 330 25% 3% etc. + .light/.sleep overrides);
+       that machinery is deliberately OMITTED here because this deck
+       is single-theme (dark) and must stay one offline file. */
+    --color-background:#0a0608; --color-background-subtle:#120a0c;
+    --color-surface:#141420; --color-surface-elevated:#1e1e30;
+    --color-surface-interactive:#252540;
+    --color-foreground:#e8e8ed; --color-foreground-secondary:#9ca3af;
+    --color-foreground-muted:#6b7280;
+    --color-primary:#324063; --color-primary-hover:#818cf8;
+    --color-primary-foreground:#ffffff;
+    --color-accent:#f59e0b; --color-accent-hover:#fbbf24;
+    --color-accent-foreground:#0a0608;
+    --color-muted:#27273a; --color-muted-foreground:#9ca3af;
+    --color-destructive:#ef4444;
+    --color-border:#27273a; --color-border-focus:#6366f1;
+    /* EQ/VU green from globals.css — the deck's "good" role */
+    --color-vu-green:#22c55e;
+
+    --font-display:'Inter',ui-sans-serif,system-ui,sans-serif;
+    --font-body:'Inter',ui-sans-serif,system-ui,sans-serif;
+    --font-mono:'JetBrains Mono',ui-monospace,monospace;
+
+    --text-xs:0.75rem; --text-xs--line-height:1.5; --text-xs--letter-spacing:0.02em;
+    --text-sm:0.875rem; --text-sm--line-height:1.5; --text-sm--letter-spacing:0.01em;
+    --text-base:1rem; --text-base--line-height:1.5;
+    --text-lg:1.125rem; --text-lg--line-height:1.4; --text-lg--letter-spacing:-0.01em;
+    --text-xl:1.25rem; --text-xl--line-height:1.35; --text-xl--letter-spacing:-0.01em;
+    --text-2xl:1.5rem; --text-2xl--line-height:1.3; --text-2xl--letter-spacing:-0.02em;
+    --text-3xl:1.875rem; --text-3xl--line-height:1.2; --text-3xl--letter-spacing:-0.02em;
+
+    --radius-sm:4px; --radius-md:8px; --radius-lg:12px;
+    --radius-xl:16px; --radius-2xl:24px; --radius-full:9999px;
+
+    --duration-instant:0ms; --duration-fast:100ms; --duration-normal:200ms;
+    --duration-slow:300ms; --duration-slower:500ms; --duration-gentle:800ms;
+    --ease-snappy:cubic-bezier(0.2,0,0,1);
+    --ease-smooth:cubic-bezier(0.16,1,0.3,1);
+    --ease-physical:cubic-bezier(0.34,1.56,0.64,1);
+
+    --breakpoint-xs:375px; --breakpoint-sm:640px; --breakpoint-md:768px;
+    --breakpoint-lg:1024px; --breakpoint-xl:1280px;
   }
+  /* Dark single-theme: makes scrollbars and form controls render dark */
+  :root{color-scheme:dark}
   *{box-sizing:border-box}
-  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:var(--sans)}
+  html,body{margin:0;height:100%;background:var(--color-background);color:var(--color-foreground);font-family:var(--font-body)}
   .deck{height:100%;overflow:hidden;position:relative}
   .slide{
     position:absolute;inset:0;padding:46px 68px 70px;overflow-y:auto;
     opacity:0;visibility:hidden;transform:translateY(8px);
-    transition:opacity .22s ease,transform .22s ease,visibility .22s;
+    transition:opacity var(--duration-normal) var(--ease-smooth),transform var(--duration-normal) var(--ease-smooth),visibility var(--duration-normal);
     /* Flex column so a .grid can stretch to fill the height. Content still
        flows from the top (no centre) and overflow scrolls normally. */
     display:flex;flex-direction:column;
@@ -32,7 +75,7 @@
   .tabbar{
     position:fixed;top:0;left:0;right:0;height:52px;z-index:10;
     display:flex;align-items:stretch;gap:0;
-    background:rgba(13,17,23,.97);border-bottom:1px solid var(--line);
+    background:rgba(10,6,8,.97);border-bottom:1px solid var(--color-border);
     backdrop-filter:blur(8px);overflow-x:auto;overflow-y:hidden;
     scrollbar-width:none;
   }
@@ -40,20 +83,20 @@
   /* Fade on the right signals more tabs exist off-screen. */
   .tabbar::after{
     content:"";position:sticky;right:0;top:0;flex:0 0 26px;
-    background:linear-gradient(to right,rgba(13,17,23,0),rgba(13,17,23,.95));
+    background:linear-gradient(to right,rgba(10,6,8,0),rgba(10,6,8,.95));
     pointer-events:none;
   }
   .tab{
     flex:0 0 auto;display:flex;align-items:center;gap:8px;
     padding:0 15px;border:0;background:transparent;cursor:pointer;
-    color:var(--dim);font-family:var(--sans);font-size:.83rem;
+    color:var(--color-foreground-secondary);font-family:var(--font-body);font-size:.83rem;
     border-bottom:2px solid transparent;white-space:nowrap;
-    transition:color .15s,border-color .15s,background .15s;
+    transition:color var(--duration-fast),border-color var(--duration-fast),background var(--duration-fast);
   }
-  .tab:hover{color:var(--ink);background:#1c2128}
-  .tab[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+  .tab:hover{color:var(--color-foreground);background:var(--color-surface-elevated)}
+  .tab[aria-selected="true"]{color:var(--color-primary-hover);border-bottom-color:var(--color-primary-hover);font-weight:600}
   .tab .num{
-    font-family:var(--mono);font-size:.68rem;opacity:.65;
+    font-family:var(--font-mono);font-size:.68rem;opacity:.65;
     min-width:15px;text-align:right;
   }
   .tab[aria-selected="true"] .num{opacity:1}
@@ -69,79 +112,79 @@
   h1{font-size:2.5rem;line-height:1.15;margin:0 0 .5rem;letter-spacing:-.02em}
   h2{font-size:1.85rem;line-height:1.2;margin:0 0 1.1rem;letter-spacing:-.015em}
   h2 .kicker, h1 .kicker{display:block;font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;
-    color:var(--dim);font-weight:600;margin-bottom:.45rem}
-  h3{font-size:1.02rem;margin:1.3rem 0 .5rem;color:var(--accent);font-weight:650}
+    color:var(--color-foreground-secondary);font-weight:600;margin-bottom:.45rem}
+  h3{font-size:1.02rem;margin:1.3rem 0 .5rem;color:var(--color-primary-hover);font-weight:650}
   p,li{font-size:1.02rem;line-height:1.62}
   p{margin:.6rem 0}
   ul{margin:.5rem 0 .5rem 1.1rem;padding:0}
   li{margin:.34rem 0}
-  .lede{font-size:1.14rem;color:#c9d1d9;max-width:60ch}
-  .dim{color:var(--dim)}
-  .grid{display:grid;gap:16px}
+  .lede{font-size:1.14rem;color:var(--color-foreground-secondary);max-width:60ch}
+  .dim{color:var(--color-foreground-secondary)}
+  .grid{display:grid;gap:16px;align-items:stretch}
   .g2{grid-template-columns:1fr 1fr}
   .g3{grid-template-columns:repeat(3,1fr)}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
-  .card h4{margin:0 0 .4rem;font-size:.95rem;color:var(--ink)}
-  .card p{font-size:.92rem;margin:.3rem 0;color:#c9d1d9;line-height:1.55}
-  .tag{display:inline-block;font-family:var(--mono);font-size:.72rem;padding:2px 7px;
-    border-radius:20px;border:1px solid var(--line);color:var(--dim);margin-right:6px}
-  .scr{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:1.4rem}
-  .scr > div{border-left:3px solid var(--accent);padding:2px 0 2px 14px}
-  .scr .n{font-family:var(--mono);font-size:.7rem;letter-spacing:.14em;color:var(--dim);
+  .card{background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-lg);padding:16px 18px}
+  .card h4{margin:0 0 .4rem;font-size:.95rem;color:var(--color-foreground)}
+  .card p{font-size:.92rem;margin:.3rem 0;color:var(--color-foreground-secondary);line-height:1.55}
+  .tag{display:inline-block;font-family:var(--font-mono);font-size:.72rem;padding:2px 7px;
+    border-radius:var(--radius-full);border:1px solid var(--color-border);color:var(--color-foreground-secondary);margin-right:6px}
+  .scr{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:1.4rem;align-items:stretch}
+  .scr > div{border-left:3px solid var(--color-primary-hover);padding:2px 0 2px 14px}
+  .scr .n{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.14em;color:var(--color-foreground-secondary);
     text-transform:uppercase;display:block;margin-bottom:.25rem}
   .scr h4{margin:0 0 .35rem;font-size:1.05rem}
-  .scr p{font-size:.92rem;margin:0;color:#c9d1d9;line-height:1.5}
-  pre{background:#010409;border:1px solid var(--line);border-radius:8px;padding:13px 15px;
-    overflow-x:auto;font-family:var(--mono);font-size:.84rem;line-height:1.55;color:#c9d1d9}
-  code{font-family:var(--mono);font-size:.88em;background:#21262d;padding:1px 5px;border-radius:4px}
-  .jargon{background:#1c2128;border-left:3px solid var(--purple);border-radius:0 8px 8px 0;
+  .scr p{font-size:.92rem;margin:0;color:var(--color-foreground-secondary);line-height:1.5}
+  pre{background:var(--color-background);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:13px 15px;
+    overflow-x:auto;font-family:var(--font-mono);font-size:.84rem;line-height:1.55;color:var(--color-foreground-secondary)}
+  code{font-family:var(--font-mono);font-size:.88em;background:var(--color-muted);padding:1px 5px;border-radius:var(--radius-sm)}
+  .jargon{background:var(--color-surface-elevated);border-left:3px solid var(--color-border-focus);border-radius:0 var(--radius-md) var(--radius-md) 0;
     padding:11px 15px;margin:13px 0}
   .jargon .t{font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;
-    color:var(--purple);font-weight:700;margin-bottom:.3rem}
-  .jargon p{margin:0;font-size:.93rem;line-height:1.55;color:#c9d1d9}
+    color:var(--color-border-focus);font-weight:700;margin-bottom:.3rem}
+  .jargon p{margin:0;font-size:.93rem;line-height:1.55;color:var(--color-foreground-secondary)}
   .flow{display:flex;align-items:stretch;gap:0;margin:1rem 0;flex-wrap:wrap}
-  .step{flex:1;min-width:132px;background:var(--panel);border:1px solid var(--line);
-    padding:12px 13px;position:relative;margin-right:16px;border-radius:8px}
+  .step{flex:1;min-width:132px;background:var(--color-surface);border:1px solid var(--color-border);
+    padding:12px 13px;position:relative;margin-right:16px;border-radius:var(--radius-md)}
   .step:last-child{margin-right:0}
   .step::after{content:"";position:absolute;right:-16px;top:50%;transform:translateY(-50%);
-    border-left:9px solid var(--accent);border-top:7px solid transparent;
+    border-left:9px solid var(--color-primary-hover);border-top:7px solid transparent;
     border-bottom:7px solid transparent;opacity:.75}
   .step:last-child::after{display:none}
-  .step .n{font-family:var(--mono);font-size:.66rem;color:var(--accent);letter-spacing:.1em}
+  .step .n{font-family:var(--font-mono);font-size:.66rem;color:var(--color-primary-hover);letter-spacing:.1em}
   .step h4{margin:.25rem 0 .3rem;font-size:.9rem}
-  .step p{font-size:.8rem;margin:0;color:var(--dim);line-height:1.45}
+  .step p{font-size:.8rem;margin:0;color:var(--color-foreground-secondary);line-height:1.45}
   table{border-collapse:collapse;width:100%;margin:.9rem 0;font-size:.9rem}
-  th,td{text-align:left;padding:8px 11px;border-bottom:1px solid var(--line);vertical-align:top}
-  th{font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);font-weight:600}
-  td.mono{font-family:var(--mono);font-size:.82rem}
-  .ok{color:var(--good);font-weight:600}
-  .no{color:var(--bad);font-weight:600}
-  .mid{color:var(--warn);font-weight:600}
-  .note{border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:0 8px 8px 0;
-    background:#1c1a12;padding:12px 15px;margin:14px 0}
-  .note p{margin:0;font-size:.92rem;color:#e6d9b8;line-height:1.55}
+  th,td{text-align:left;padding:8px 11px;border-bottom:1px solid var(--color-border);vertical-align:top}
+  th{font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;color:var(--color-foreground-secondary);font-weight:600}
+  td.mono{font-family:var(--font-mono);font-size:.82rem}
+  .ok{color:var(--color-vu-green);font-weight:600}
+  .no{color:var(--color-destructive);font-weight:600}
+  .mid{color:var(--color-accent);font-weight:600}
+  .note{border:1px solid var(--color-border);border-left:3px solid var(--color-accent);border-radius:0 var(--radius-md) var(--radius-md) 0;
+    background:color-mix(in srgb,var(--color-accent) 7%,var(--color-surface-elevated));padding:12px 15px;margin:14px 0}
+  .note p{margin:0;font-size:.92rem;color:color-mix(in srgb,var(--color-accent) 60%,var(--color-foreground));line-height:1.55}
   .note .t{font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;
-    color:var(--warn);font-weight:700;margin-bottom:.3rem}
+    color:var(--color-accent);font-weight:700;margin-bottom:.3rem}
   .bignum{font-size:2.5rem;font-weight:700;letter-spacing:-.03em;line-height:1}
-  .bignum.s{color:var(--good)}
-  .stat{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:15px 17px}
-  .stat .lbl{font-size:.74rem;text-transform:uppercase;letter-spacing:.1em;color:var(--dim)}
-  .stat .sub{font-size:.84rem;color:var(--dim);margin-top:.3rem}
+  .bignum.s{color:var(--color-vu-green)}
+  .stat{background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-lg);padding:15px 17px}
+  .stat .lbl{font-size:.74rem;text-transform:uppercase;letter-spacing:.1em;color:var(--color-foreground-secondary)}
+  .stat .sub{font-size:.84rem;color:var(--color-foreground-secondary);margin-top:.3rem}
   .footer{position:absolute;bottom:0;left:0;right:0;height:56px;display:flex;
     align-items:center;justify-content:space-between;padding:0 68px;
-    border-top:1px solid var(--line);background:rgba(13,17,23,.94);font-size:.78rem;
-    color:var(--dim);backdrop-filter:blur(6px)}
-  .prog{position:absolute;bottom:55px;left:0;height:2px;background:var(--accent);
-    transition:width .22s ease;z-index:5}
-  .hint{font-family:var(--mono);font-size:.72rem}
+    border-top:1px solid var(--color-border);background:rgba(10,6,8,.94);font-size:.78rem;
+    color:var(--color-foreground-secondary);backdrop-filter:blur(6px)}
+  .prog{position:absolute;bottom:55px;left:0;height:2px;background:var(--color-primary-hover);
+    transition:width var(--duration-normal) var(--ease-smooth);z-index:5}
+  .hint{font-family:var(--font-mono);font-size:.72rem}
   /* The title div is a CHILD of the section, so height:100% resolves against
      an auto-height flex item and collapses. flex:1 makes it fill the section
      so justify-content can centre its content. */
-  .title-slide{display:flex;flex-direction:column;justify-content:center;flex:1 1 auto;min-height:0}
-  .title-slide .meta{margin-top:2rem;color:var(--dim);font-size:.92rem;line-height:1.7}
-  strong{color:#fff;font-weight:650}
+  .title-slide{display:flex;flex-direction:column;justify-content:center;flex:1 1 auto;min-height:0;align-items:flex-start}
+  .title-slide .meta{margin-top:2rem;color:var(--color-foreground-secondary);font-size:.92rem;line-height:1.7}
+  strong{color:var(--color-primary-foreground);font-weight:650}
   .vs{display:grid;grid-template-columns:1fr auto 1fr;gap:18px;align-items:center;margin:1.1rem 0}
-  .vs .mid{align-self:center;font-family:var(--mono);font-size:.78rem;color:var(--dim)}
+  .vs .mid{align-self:center;font-family:var(--font-mono);font-size:.78rem;color:var(--color-foreground-secondary)}
   @media(max-width:900px){
     .slide{padding:32px 26px 76px}
     .g2,.g3,.scr{grid-template-columns:1fr}
@@ -228,7 +271,7 @@
 
 <!-- 5 ───────────────────────────────────────────── -->
 <section class="slide">
-  <h2><span class="kicker">Key concepts</span>The five things you need to know</h2>
+  <h2><span class="kicker">Key concepts</span>The six things you need to know</h2>
   <div class="grid g2">
     <div class="card"><h4>1 · Text becomes numbers (embeddings)</h4><p>A turn like <em>"wire up the amplitude feed"</em> is converted into a list of ~400 numbers that captures its <strong>meaning</strong>. Similar work produces similar numbers. This is the only "magic" step, and it is a standard off-the-shelf component.</p></div>
     <div class="card"><h4>2 · A tiny classifier on top</h4><p>Once turns are numbers, labelling them is ordinary supervised learning — the same shape as logistic regression you may have used. It learns a boundary between "connect a source" and "fix bad data".</p></div>
