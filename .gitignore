@@ -32,3 +32,11 @@ tasks/lessons.md
 # walk intact rather than as an ignored `examples/` dir.
 *.jsonl
 !examples/*.jsonl
+
+# Executed notebook copies. Running
+#   jupyter nbconvert --execute notebooks/X.ipynb --output X_check.ipynb
+# writes one beside the original with outputs populated, which the guard's
+# Pass 3 rejects (every committed notebook must have empty outputs). Ignoring
+# the pattern rather than relying on remembering to `rm` it.
+*_check.ipynb
+*_out.ipynb
