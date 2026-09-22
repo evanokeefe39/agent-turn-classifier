@@ -172,13 +172,22 @@ def classify_span(span: dict) -> tuple[bool, str]:
         return False, "interruption"
     if has_tools and span["aborted"] and not produced:
         return False, "interruption"
+    # EDGE CASE (inventory): a span with no actions must still produce something
+    # substantive. A reply floor alone is not sufficient — the acknowledgement
+    # class also arrives on the *assistant* side ("ok", "4", "Hello"), and those
+    # spans carry a thinking block, so an earlier `reasoning_only` branch
+    # admitted them as work and inflated the corpus. Substance is the larger of
+    # the reply and the reasoning trace: a long trace with a one-line answer IS
+    # a unit of work; a stub trace answering "ok" is a conversation.
+    substance = max(len(span["reply"]), len(span["thinking_text"]))
+    if not has_tools and substance < MIN_REPLY_CHARS:
+        return False, "trivial"
+
     if has_tools:
         return True, "actions"
-    if span["reply"] and len(span["reply"]) >= MIN_REPLY_CHARS:
+    if len(span["reply"]) >= MIN_REPLY_CHARS:
         return True, "reply_only"
-    if span["thinking"] and span["thinking_text"]:
-        return True, "reasoning_only"
-    return False, "empty"
+    return True, "reasoning_only"
 
 
 def span_view(span: dict, max_intents: int = 12) -> str:
