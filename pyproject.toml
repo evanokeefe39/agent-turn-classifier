@@ -39,6 +39,7 @@ module-root = "src"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["slow: requires the [train] extra; downloads an encoder on first run"]
+addopts = "--strict-markers"
 
 [tool.ruff]
 line-length = 100

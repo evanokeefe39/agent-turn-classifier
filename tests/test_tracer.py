@@ -117,6 +117,56 @@ def test_build_turns_segments_on_user_records():
     assert any(t.actions for t in turns)
 
 
+def test_teacher_and_student_score_the_same_population():
+    """The teacher and student must be scored on the SAME turn population.
+
+    `frame` drops `unmapped` rows (a teacher-only discovery class the student
+    never predicts). If the teacher is scored over all labelled turns instead,
+    the two macro-F1s describe different populations and `ceiling_gap` is
+    meaningless — silently, because at unmapped_rate=0.0 the populations are
+    identical. The real bug: a teacher abstaining on some turns made the
+    teacher's denominator strictly larger than the student's.
+
+    This checks the invariant without loading an encoder, so it stays in the
+    fast suite.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    turns = T.build_turns(T.read_canonical(EX / "sessions.sample.jsonl"))
+    views = {t.turn_id: T.render(t) for t in turns}
+    canned = {
+        _json.loads(l)["view_sha256"]: _json.loads(l)["workflow"]
+        for l in (_Path(EX) / "canned_labels.jsonl").read_text(encoding="utf-8").splitlines()
+        if l.strip()
+    }
+    teacher_labels = {
+        t.turn_id: canned.get(T.view_sha(views[t.turn_id]), "unmapped") for t in turns
+    }
+    truth = {
+        _json.loads(l)["turn_id"]: _json.loads(l)["workflow"]
+        for l in (_Path(EX) / "sessions.sample.labels.jsonl").read_text(encoding="utf-8").splitlines()
+        if l.strip()
+    }
+
+    # The fixture must exercise the bug's precondition: turns excluded from the
+    # training frame. These are `none` turns here — the mock teacher always has
+    # an answer, so it never emits `unmapped`, and `none` is what makes the
+    # frame's population smaller than the labelled one.
+    frame_ids = [
+        t.turn_id
+        for t in turns
+        if teacher_labels[t.turn_id] not in T.RESERVED_NON_TRAINABLE
+    ]
+    assert len(frame_ids) < len(turns), (
+        "fixture has no reserved-label turns — the denominator bug is undetectable here"
+    )
+
+    # Every turn the student could be scored on must also have ground truth, so
+    # neither side can silently drop a row the other kept.
+    assert all(tid in truth for tid in frame_ids), "a scored turn has no truth label"
+
+
 @pytest.mark.slow
 def test_run_tracer_end_to_end():
     """The full chain. Requires the [train] extra (downloads an encoder).

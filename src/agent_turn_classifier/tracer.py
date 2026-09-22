@@ -281,15 +281,37 @@ def majority(votes: list[dict]) -> dict:
 # ---------------------------------------------------------------- dataset
 
 
+# The two reserved labels, which are NOT trainable classes and NOT scored.
+# They mean different things (P3) and are excluded for different reasons:
+#   `none`     — abstention: the turn is not work, so it has no path label.
+#   `unmapped` — taxonomy gap: real work with no declared home; the discovery
+#                residue, teacher-only.
+# Keeping them in one constant is what guarantees the student and the teacher
+# are scored on the same turn population.
+RESERVED_NON_TRAINABLE = frozenset({"none", "unmapped"})
+
+
 def build_frame(turns: list[Turn], views: dict[str, str], labels: dict[str, str]):
-    """Build a pandas frame of (session, view, label) for turns that have labels."""
+    """Build a pandas frame of (session, view, label) for TRAINABLE turns.
+
+    Two reserved labels are excluded, for different reasons (P3):
+
+      `unmapped` — real work with no declared home. The discovery residue; a
+                   teacher-only class the student never predicts.
+      `none`     — not work at all (an empty prompt, a bare acknowledgement).
+                   It is not a domain/workflow path, so it cannot be a class in
+                   a path macro-F1 over `domain/workflow`.
+
+    Both are excluded from training AND from scoring, which is what keeps the
+    student's and teacher's populations identical.
+    """
     import pandas as pd
 
     rows = []
     for t in turns:
         lab = labels.get(t.turn_id)
-        if not lab or lab == "unmapped":
-            continue  # unmapped is the discovery residue: never trained on (P3)
+        if not lab or lab in RESERVED_NON_TRAINABLE:
+            continue
         rows.append({"turn_id": t.turn_id, "session_id": t.session_id,
                      "view": views[t.turn_id], "label": lab})
     return pd.DataFrame(rows)
@@ -392,11 +414,29 @@ def run_tracer(
         majority_rows[t.turn_id] = maj
 
     # Resolve the flat path label the primary metric scores.
+    #
+    # `path()` maps a WORKFLOW id to "<domain>/<workflow>". Reserved labels are
+    # NOT workflow ids and must pass through untouched — collapsing them here
+    # would make `path("none") == "unmapped"`, which silently merges two
+    # distinct signals (abstention vs taxonomy gap) and corrupts both the
+    # coverage count and the scored population. Keep raw labels for counting;
+    # apply `path()` only to the values that are actually scored.
     wf_domain = {w.id: w.domain for w in workflows}
+
     def path(wf: str) -> str:
+        if wf in RESERVED_NON_TRAINABLE:
+            return wf  # reserved labels are not workflow ids: never rewritten
         return f"{wf_domain[wf]}/{wf}" if wf in wf_domain else "unmapped"
 
-    teacher_labels = {k: path(v) for k, v in teacher_labels.items()}
+    # ONE label space, applied at ONE boundary.
+    #
+    # `path()` converts a workflow id to the flat "<domain>/<workflow>" the
+    # primary metric scores, and passes reserved labels through untouched.
+    # Every label set below — the teacher's, the ground truth's, and the frame
+    # the student trains and is scored on — must be in that same space. Mixing
+    # raw ids with path labels makes both macro-F1s collapse toward zero and
+    # the gap meaningless, so the mapping happens here and nowhere else.
+    teacher_path_labels = {k: path(v) for k, v in teacher_labels.items()}
 
     truth = {}
     for line in Path(labels).read_text(encoding="utf-8").splitlines():
@@ -404,7 +444,7 @@ def run_tracer(
             row = json.loads(line)
             truth[row["turn_id"]] = path(row["workflow"])
 
-    frame = build_frame(turns, views, teacher_labels)
+    frame = build_frame(turns, views, teacher_path_labels)
     if frame.empty:
         raise ValueError("no labelled turns — nothing to train on")
 
@@ -423,27 +463,52 @@ def run_tracer(
         y_true.extend(frame.iloc[te]["label"])
         y_pred.extend(preds)
 
-    teacher_paths = [teacher_labels[t.turn_id] for t in turns if t.turn_id in teacher_labels]
-    truth_paths = [truth[t.turn_id] for t in turns if t.turn_id in teacher_labels and t.turn_id in truth]
+    # The teacher must be scored on EXACTLY the population the student is
+    # scored on. `frame` already dropped `unmapped` rows (they are a
+    # teacher-only discovery class, never predicted), so restricting the
+    # teacher/truth lists to the frame's turn ids is what makes the two
+    # macro-F1s comparable — and what makes `ceiling_gap` a subtraction of
+    # like from like. Scoring the teacher over all labelled turns instead
+    # silently mixes populations: invisible at unmapped_rate=0.0, wrong the
+    # moment the teacher abstains on anything.
+    scored_ids = list(frame["turn_id"])  # list, not set: iteration order must be stable
+    teacher_paths = [teacher_path_labels[tid] for tid in scored_ids]
+    truth_paths = [truth[tid] for tid in scored_ids]
+
+    student_f1 = path_macro_f1(y_true, y_pred)
+    teacher_f1 = path_macro_f1(truth_paths, teacher_paths)
+
+    # Coverage is counted from the RAW teacher labels, never the path form:
+    # `path()` would rewrite any unknown id to "unmapped", so counting after
+    # mapping makes an abstention indistinguishable from a taxonomy gap.
+    # They are different signals — `none` means not work, `unmapped` means
+    # work with no declared home — and merging them inflates the coverage
+    # figure with turns that were never work in the first place.
+    n_none = sum(1 for v in teacher_labels.values() if v == "none")
+    n_unmapped = sum(1 for v in teacher_labels.values() if v == "unmapped")
+    n_work = max(1, len(teacher_labels) - n_none)
 
     return {
         "n_turns": len(turns),
         "n_sessions": frame["session_id"].nunique(),
-        "n_labelled": len(frame),
+        # Three populations, named so they cannot be confused:
+        #   n_teacher_labelled — every turn the teacher gave a verdict on
+        #   n_none             — of those, not work (abstention)
+        #   n_scored           — of those, trainable and scored (the intersection
+        #                        of a teacher label and known ground truth)
+        "n_teacher_labelled": len(teacher_labels),
+        "n_none": n_none,
+        "n_unmapped": n_unmapped,
+        "n_work": len(teacher_labels) - n_none,
+        "n_scored": len(scored_ids),
         "n_classes": frame["label"].nunique(),
-        "unmapped_rate": round(
-            1 - len(frame) / max(1, sum(1 for t in turns if t.turn_id in teacher_labels)), 3
-        ),
-        "student_path_macro_f1": round(path_macro_f1(y_true, y_pred), 3),
-        "teacher_path_macro_f1": round(
-            path_macro_f1(truth_paths, [teacher_labels[t.turn_id] for t in turns
-                                        if t.turn_id in teacher_labels and t.turn_id in truth]), 3
-        ),
-        "ceiling_gap": round(
-            path_macro_f1(truth_paths, [teacher_labels[t.turn_id] for t in turns
-                                        if t.turn_id in teacher_labels and t.turn_id in truth])
-            - path_macro_f1(y_true, y_pred), 3
-        ),
+        # Taxonomy coverage: the share of WORK turns the taxonomy could name.
+        # `none` is excluded from the denominator — abstaining on a turn that
+        # is not work is correct behaviour, not a coverage gap.
+        "unmapped_rate": round(n_unmapped / n_work, 3),
+        "student_path_macro_f1": round(student_f1, 3),
+        "teacher_path_macro_f1": round(teacher_f1, 3),
+        "ceiling_gap": round(teacher_f1 - student_f1, 3),
         "n_folds": n_splits,
         "encoder": encoder,
     }
