@@ -1,0 +1,31 @@
+# Normalize line endings to LF in the repository, regardless of platform.
+# Without this, editing a file on Windows rewrites every line and turns a
+# one-line change into a whole-file diff — and a script that parsed before
+# no longer parses after.
+* text=auto eol=lf
+
+# Scripts and configs must be LF.
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.jsonl text eol=lf
+
+# Markdown and text: LF.
+*.md text eol=lf
+*.txt text eol=lf
+*.py text eol=lf
+
+# Notebooks: JSON, but treat as text so diffs stay readable. Cell outputs are
+# never committed (the guard asserts every notebook has empty outputs).
+*.ipynb text eol=lf
+
+# Binary — never touch.
+*.png binary
+*.jpg binary
+*.webp binary
+*.zip binary
+*.parquet binary
+*.onnx binary
+*.db binary
+*.safetensors binary

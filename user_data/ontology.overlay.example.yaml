@@ -1,0 +1,71 @@
+# Ontology overlay — hand-authored refinements layered onto a parsed/compiled taxonomy.
+#
+# Copy to `user_data/ontology.overlay.yaml` (or your own name) and point `ontology.overlay` at it.
+#
+# This file exists in two roles, and they are the same shape:
+#   1. INPUT  — what you author by hand: triggers, excludes, process steps, extra attributes.
+#   2. OUTPUT — what `atc discover` proposes after reading the `unmapped` residue, which you then
+#               review and merge. Discovered candidates arrive with the same keys as authored ones
+#               so the two are indistinguishable downstream; provenance lives in the run manifest.
+#
+# The overlay is merged by id, so an entry may add to a parsed workflow or introduce a new one.
+#
+# Keys per workflow (all optional):
+#   id        - matches a workflow from the base taxonomy, or a new id for a derived workflow
+#   name      - display name (required when `id` is new)
+#   domain    - required when `id` is new; otherwise inherited
+#   triggers  - observable signs that THIS workflow is happening. At least one, non-empty.
+#   excludes  - "<other_workflow_id>: <reason>". Required when a domain holds >= 2 workflows.
+#               The reason must name a discriminating trigger and be >= 4 words, so that a
+#               teacher-assisted repair pass cannot emit a vacuous placeholder that validates
+#               while disambiguating nothing.
+#   process   - ordered steps, the substrate the `conformance` dimension reads. A conformance run
+#               fails loudly ("without per-workflow process steps this dimension is unmeasurable")
+#               rather than producing a meaningless score.
+#   attributes - free-form passthrough
+
+version: 1
+
+workflows:
+  # --- Authored refinement: the base taxonomy has this workflow; we sharpen its triggers. ---
+  - id: W3
+    triggers:
+      - modifies an existing pipeline or asset rather than adding one
+      - edits a transformation that other assets already depend on
+    process:
+      - read the current implementation
+      - change the transformation
+      - run the affected pipeline
+      - verify downstream outputs are unchanged
+
+  # --- Same-domain pair: `excludes` is mandatory, and the reason must discriminate. ---
+  # W1 introduces a source; W2 introduces a transformation. They share a domain, so each must
+  # state why it is NOT the other, naming the trigger that separates them.
+  - id: W1
+    excludes:
+      - "W2: introducing a new transformation is not onboarding a source"
+    triggers:
+      - a new external system, API or table is being connected for the first time
+      - credentials, a client library or a schema mapping is being added for a new origin
+
+  - id: W2
+    excludes:
+      - "W1: adding a derived dataset is not connecting a new source"
+    triggers:
+      - a new derived table or view is being written from data already in the platform
+      - business logic, joins or aggregations are being authored
+
+  # --- Derived (example of what `atc discover` promotes, once a human confirms it). ---
+  # A workflow the base taxonomy had no home for. It was NOT seeded by hand — it was found by
+  # clustering turns the teacher could not place, and promoted into this file after review.
+  - id: EXT-PROBE
+    name: Harness capability probe
+    domain: Agent Ops
+    triggers:
+      - the prompt asks the agent to run a specific command and report raw output
+      - the work tests a harness feature rather than producing a deliverable
+    excludes:
+      - "W3: probing a capability is not modifying a pipeline"
+    attributes:
+      discovered_from: unmapped-residue
+      promoted_at: 2026-09-22

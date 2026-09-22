@@ -1,0 +1,48 @@
+[project]
+name = "agent-turn-classifier"
+version = "0.0.1"
+description = "Label every turn of your AI coding agent's sessions with a workflow from your own taxonomy — teacher-labelled, human-audited, distilled into a small local CPU classifier."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Evan O'Keefe" }]
+
+dependencies = ["pyyaml>=6.0.2"]
+
+[project.optional-dependencies]
+# Training stack. Kept out of the default install so `atc doctor` and
+# `atc predict` stay dependency-light — the same reason the plan gates
+# `setfit` and `contrastive` behind extras.
+train = ["scikit-learn>=1.9", "sentence-transformers>=6.1", "pandas>=2.2", "numpy>=2.0"]
+onnx = ["onnxruntime>=1.30", "tokenizers>=0.23"]
+all = ["agent-turn-classifier[train,onnx]"]
+
+[project.urls]
+Homepage = "https://github.com/evanokeefe39/agent-turn-classifier"
+Repository = "https://github.com/evanokeefe39/agent-turn-classifier"
+Issues = "https://github.com/evanokeefe39/agent-turn-classifier/issues"
+
+[project.scripts]
+atc = "agent_turn_classifier.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9,<0.10"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[tool.uv.build-backend]
+module-root = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: requires the [train] extra; downloads an encoder on first run"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]

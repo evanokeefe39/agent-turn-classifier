@@ -1,0 +1,83 @@
+# Synthetic taxonomy for the tracer. Fictional workflows — no real client or
+# employer taxonomy ever ships in this repo.
+#
+# Shape mirrors the plan's ontology model: domains hold workflows; workflows
+# carry triggers (positive signals) and excludes (why it is not its sibling).
+# `excludes` is mandatory when a domain holds >= 2 workflows.
+version: 1
+domains:
+  - id: Data Integration
+    defn: Connecting sources and deriving datasets.
+  - id: Data Quality
+    defn: Detecting and repairing wrong or missing data.
+  - id: Platform
+    defn: Infrastructure and environment concerns.
+  - id: Agent Ops
+    defn: Work on the agent harness itself rather than a data product.
+
+workflows:
+  - id: W1
+    name: source onboarding
+    domain: Data Integration
+    defn: Connect a new external system for the first time.
+    triggers:
+      - a new external system, API or table is connected for the first time
+      - credentials, a client library or a schema mapping is added for a new origin
+    excludes:
+      - "W2: adding a derived dataset is not connecting a source"
+      - "W3: onboarding a source is not modifying an existing pipeline"
+
+  - id: W2
+    name: derived dataset
+    domain: Data Integration
+    defn: Author business logic over data already in the platform.
+    triggers:
+      - a new derived table or view is written from data already present
+      - business logic, joins or aggregations are authored
+    excludes:
+      - "W1: connecting a new source is not adding a transformation"
+      - "W3: authoring new logic is not changing an existing pipeline"
+
+  - id: W3
+    name: pipeline modification
+    domain: Data Integration
+    defn: Change an existing pipeline that other assets depend on.
+    triggers:
+      - an existing pipeline or asset is modified rather than added
+      - a transformation others depend on is edited
+    excludes:
+      - "W1: onboarding a source is not modifying an existing pipeline"
+      - "W2: authoring new logic is not changing an existing pipeline"
+
+  - id: W5
+    name: quality incident fix
+    domain: Data Quality
+    defn: Diagnose and repair wrong data already landed.
+    triggers:
+      - wrong, missing or duplicated data is being investigated
+      - a backfill or reprocessing follows a root-cause diagnosis
+    excludes:
+      - "W2: authoring new logic is not repairing existing data"
+
+  - id: W7
+    name: environment provisioning
+    domain: Platform
+    defn: Stand up or configure an environment.
+    triggers:
+      - infrastructure is provisioned or an environment configured
+      - terraform, containers or environment config are written
+    excludes:
+      - "W2: provisioning infrastructure is not writing a transformation"
+
+  - id: EXT-PROBE
+    name: harness capability probe
+    domain: Agent Ops
+    defn: Test a harness capability rather than produce a deliverable.
+    triggers:
+      - the prompt asks for a specific command to be run and raw output reported
+      - the work tests a harness feature rather than producing an artefact
+    excludes:
+      - "W3: probing a capability is not modifying a pipeline"
+    attributes:
+      note: In the real run this workflow is *derived* by the promotion loop
+            from the unmapped residue, not authored up front.

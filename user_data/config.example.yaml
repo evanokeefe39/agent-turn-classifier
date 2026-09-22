@@ -1,0 +1,41 @@
+# Minimal working config for agent-turn-classifier.
+#
+# Copy to `user_data/config.local.yaml` (no `.example` suffix) and edit. The copy is gitignored;
+# this file is tracked so a fresh clone has a runnable starting point.
+#
+# This is deliberately minimal rather than an exhaustive template: every key below is required by
+# `atc demo` and exercised by the test suite. Add keys only as you need them — the full schema is
+# documented per-command in `docs/`, and a stale annotated template is worse than no template.
+
+# Where sessions come from. Each source needs an adapter and a root.
+sessions:
+  omp:
+    adapter: omp
+    root: examples/          # replace with your own: C:/Users/<you>/.omp/agent/sessions
+    glob: "*.jsonl"
+  # claude_code:
+  #   adapter: claude_code
+  #   root: C:/Users/<you>/.claude/projects
+  #   glob: "**/*.jsonl"
+
+# The user's own workflow taxonomy. `parse` reads a tabular doc; `compile` extracts from prose.
+ontology:
+  mode: parse
+  path: examples/ontology.example.yaml
+  # Hand-authored triggers/excludes/process + anything the promotion loop derives live here.
+  # It starts empty: extensions are produced BY `atc discover`, never seeded up front.
+  overlay: user_data/ontology.overlay.example.yaml
+
+# Time windows, half-open ISO ranges. Buckets your turns for the coverage report.
+windows:
+  - {name: all, start: 2026-01-01T00:00:00+02, end: 2027-01-01T00:00:00+02}
+
+# Teacher (weak labeller). `mock` replays examples/canned_labels.jsonl — no API key, no network.
+teacher:
+  provider: mock
+  model: mock
+  allowed_hosts: []          # a real provider needs its host listed here
+  max_cost_usd: 5
+
+# Artifacts. Everything generated lands here; this tree is gitignored and safe to delete.
+out_dir: .out
