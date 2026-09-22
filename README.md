@@ -32,38 +32,55 @@ it. It runs the full chain on a **synthetic** 84-turn corpus, on a free Colab
 
 ### What it measured — and what it does NOT measure
 
-The synthetic fixture is templated, so held-out turns are **near-duplicates of
-training turns**: mean nearest-neighbour cosine 0.932, with 23 of 72 turns
-having a >0.95 neighbour. Session-disjoint folds do not prevent this, because
-the *text* repeats across sessions, not just within them.
-
 | corpus | turns | sessions | classes | student macro-F1 | teacher macro-F1 | gap |
 |---|---|---|---|---|---|---|
 | first cut | 17 | 5 | 6 | 0.056 | 0.752 | +0.697 |
 | scaled | 84 | 12 | 6 | 0.982 | 0.708 | **−0.274** |
 
-**Both rows are misleading, for different reasons.**
+**Neither row measures distillation, and the second one looks impossible.**
 
-The first was corpus density: `GroupKFold(3)` over 5 sessions left ~11 training
-examples for 6 classes, which the design's own `--min-class-support` (8)
-rejects. Real as a lesson, but it measured the fixture's poverty.
+The first row was corpus density: `GroupKFold(3)` over 5 sessions left ~11
+training examples for 6 classes, which the design's own `--min-class-support`
+(8) rejects.
 
-The second is worse, and it is a **negative gap** — the student appears to beat
-its ceiling, which should be impossible. It isn't impossible here: it is
-near-duplicate leakage. The student memorises the templated surface forms, so a
-held-out turn is answered by matching a near-identical training turn. Measured
-honestly with leave-one-out (train on 71, test on 1), the same student scores
-**0.722**, not 0.982.
+The second row is a **negative gap** — the student appears to beat the teacher.
+A diagnostic over the four combinations of {GroupKFold, LeaveOneOut} ×
+{target=teacher, target=truth} settles what it means:
 
-**There is no real ceiling measurement in this tracer.** The mock teacher reads
-`canned_labels.jsonl`, so `teacher_path_macro_f1` (0.708) is just
-`1 − injected_error_rate` (19/72 ≈ 26%) — it is a property of the fixture, not a
-bound on what the student can achieve. A ceiling requires a real teacher and a
-gold set, which is the real run.
+```
+                    target=teacher   target=truth
+  GroupKFold(3)        0.705          0.982
+  LeaveOneOut          0.691          0.966
+```
 
-Each metric is asserted to be computed over the *same* turn population as its
-counterpart, which is the one property the tracer does prove: the units are
-right even when the numbers are not informative.
+**There is no leakage.** Student-vs-truth is 0.982 under GroupKFold and 0.966
+under LeaveOneOut — essentially identical, and LOO *trains on more* turns (71 vs
+48), so leakage would raise it, not leave it flat. And of 72 nearest neighbours,
+**72 are same-workflow and 0 are cross-workflow**: the high cosine similarity is
+class signal, not duplicated text.
+
+**The 0.26 difference was a target artefact.** Reading across the table, the
+target column — not the split — accounts for nearly all of it. Scoring against
+the teacher's labels is simply harder, because the mock's labels carry a
+deliberately injected 26% error rate.
+
+So the honest reading: **this fixture is too easy to measure distillation.**
+Six synthetic workflows are separable by bge-small at 12 examples per class, and
+the student reaches ~0.97 against truth under any split. The teacher's 0.708 is
+just `1 − injected_error_rate` — it is not a ceiling and bounds nothing.
+
+The plan-level consequence is the thing worth carrying forward:
+
+> **`ceiling_gap` cannot detect distillation failure when a student can exceed
+> its teacher — and the ship rule keys on exactly that quantity.** The ship rule
+> needs a different quantity: gate on teacher-vs-truth on held-out turns, or on
+> a corpus where the teacher's accuracy genuinely exceeds the student's.
+
+What the tracer *does* prove, and this is not nothing: the chain runs end to end
+offline on a free CPU runtime in ~30s; folds are session-disjoint (asserted on
+the fitted folds); and teacher and student are scored on the same turn
+population, with counts that partition the turn set. The units are right even
+where the magnitudes are uninformative.
 
 
 | Included in the tracer | Deferred to the real build |
