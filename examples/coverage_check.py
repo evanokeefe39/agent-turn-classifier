@@ -35,6 +35,12 @@ from spans import classify_span, load_rows, span_view, spans_of  # noqa: E402
 NOISE_DIRS = {
     "-", "--C--tmp--", "--C--tmp-hookprobe--", "--C--tmp-probe-main--",
     "-.omp", "-.cache-otel-spike",
+    # Parent/scratch cwd encodings, not projects: `-repos` is the bare parent of
+    # every repo and `-tmp` is scratch. They contribute spans but carry no
+    # project identity, so counting them overstates the corpus with sessions
+    # that belong to no project. Extend with corpus.exclude_projects if your
+    # layout differs.
+    "-repos", "-tmp",
 }
 
 CONFIG_CANDIDATES = (
@@ -106,17 +112,31 @@ def main() -> int:
     root = cfg["sessions_root"]
     if not root.is_dir():
         raise SystemExit(f"{cfg['config_path']}: sessions root not a directory: {root}")
+    # The tracked example config points at `examples/`, so a clone with no local
+    # config would otherwise "succeed" against three fixture files and print a
+    # coverage percentage from a handful of spans — the finds-nothing-and-reports
+    # -it-as-a-result mode this script exists to avoid.
+    if root.resolve() == Path("examples").resolve():
+        print("WARNING: running against the tracked `examples/` fixtures, not a "
+              "real corpus. The percentages below describe sample data. Point "
+              "sessions.omp.root at your own sessions root in "
+              "user_data/config.local.yaml.\n")
     files = discover(root, cfg["exclude_projects"])
     spans: list[dict] = []
     excluded = Counter()
+    excluded_total = 0
     for path in files:
         for span in spans_of(load_rows(path)):
             ok, why = classify_span(span)
             if not ok:
                 excluded[why] += 1
+                excluded_total += 1
                 continue
             span["_session"] = path.name
             span["_project"] = path.parent.name
+            # Positional within the file: a (session, ts) key can repeat when
+            # two user messages share a millisecond, so identity is positional.
+            span["_id"] = f"{path.name}:{len(spans) + excluded_total}"
             spans.append(span)
 
     # Corpus stamp: totals drift as the maintainer works, so record the cutoff.
@@ -140,18 +160,27 @@ def main() -> int:
         by_project.setdefault(s["_project"], []).append(s)
 
     picked: list[dict] = []
+    taken: set[str] = set()
     project_names = sorted(by_project)
-    idx = 0
     while len(picked) < args.sample and project_names:
         progressed = False
         for name in project_names:
             if len(picked) >= args.sample:
                 break
+            # BUG FIXED: the pool previously filtered only on the per-session
+            # cap, never on spans already drawn, so a session holding fewer
+            # spans than the cap re-offered the same span and `rng.choice`
+            # returned it again — the same span could enter the sample up to
+            # `--per-session` times. That broke independence between sampled
+            # units and inflated the corpus counts. Identity is now tracked.
             pool = [s for s in by_project[name]
-                    if sum(1 for p in picked if p["_session"] == s["_session"]) < args.per_session]
+                    if s["_id"] not in taken
+                    and sum(1 for p in picked if p["_session"] == s["_session"]) < args.per_session]
             if not pool:
                 continue
-            picked.append(rng.choice(pool))
+            choice = rng.choice(pool)
+            picked.append(choice)
+            taken.add(choice["_id"])
             progressed = True
         if not progressed:
             break
@@ -177,6 +206,7 @@ def main() -> int:
     Path(args.out).write_text(
         json.dumps({"stamp": stamped, "spans": [
             {"project": s["_project"], "session": s["_session"], "ts": s["ts"],
+             "id": s["_id"], "reason": classify_span(s)[1],
              "band": band(s), "n_actions": len(s["tools"]),
              "user": s["user"][:400],
              "intents": [t["intent"] for t in s["tools"] if t["intent"]],

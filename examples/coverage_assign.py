@@ -20,33 +20,51 @@ from pathlib import Path
 # Value is a declared domain, "UNMAPPED" (agent work, not data engineering),
 # or "NONE" (not work).
 # fmt: off
-D = {
- 1:"UNMAPPED",  2:"UNMAPPED",  3:"UNMAPPED",  4:"UNMAPPED",  5:"UNMAPPED",
- 6:"UNMAPPED",  7:"UNMAPPED",  8:"UNMAPPED",  9:"UNMAPPED", 10:"Analytics and BI",
-11:"UNMAPPED", 12:"UNMAPPED", 13:"UNMAPPED", 14:"UNMAPPED", 15:"UNMAPPED",
-16:"UNMAPPED", 17:"NONE",     18:"UNMAPPED", 19:"UNMAPPED", 20:"UNMAPPED",
-21:"UNMAPPED", 22:"UNMAPPED", 23:"UNMAPPED", 24:"UNMAPPED", 25:"UNMAPPED",
-26:"Data Storage", 27:"UNMAPPED", 28:"UNMAPPED", 29:"UNMAPPED", 30:"UNMAPPED",
-31:"UNMAPPED", 32:"NONE",     33:"Data Integration", 34:"UNMAPPED", 35:"UNMAPPED",
-36:"Data Security", 37:"UNMAPPED", 38:"UNMAPPED", 39:"UNMAPPED", 40:"UNMAPPED",
-41:"UNMAPPED", 42:"UNMAPPED", 43:"UNMAPPED", 44:"NONE",     45:"UNMAPPED",
-46:"Analytics and BI", 47:"Data Integration", 48:"UNMAPPED", 49:"UNMAPPED", 50:"UNMAPPED",
-51:"UNMAPPED", 52:"UNMAPPED", 53:"NONE",     54:"UNMAPPED", 55:"UNMAPPED",
-56:"UNMAPPED", 57:"UNMAPPED", 58:"UNMAPPED", 59:"Data Integration", 60:"Data Integration",
-61:"UNMAPPED", 62:"UNMAPPED", 63:"UNMAPPED", 64:"UNMAPPED", 65:"UNMAPPED",
-66:"UNMAPPED", 67:"UNMAPPED", 68:"NONE",     69:"Data Integration", 70:"UNMAPPED",
-71:"UNMAPPED", 72:"UNMAPPED", 73:"UNMAPPED", 74:"UNMAPPED", 75:"UNMAPPED",
-76:"UNMAPPED", 77:"UNMAPPED", 78:"UNMAPPED", 79:"UNMAPPED", 80:"UNMAPPED",
-81:"UNMAPPED", 82:"UNMAPPED", 83:"Data Quality", 84:"UNMAPPED", 85:"UNMAPPED",
-86:"UNMAPPED", 87:"UNMAPPED", 88:"UNMAPPED", 89:"UNMAPPED", 90:"UNMAPPED",
-91:"UNMAPPED", 92:"UNMAPPED", 93:"UNMAPPED", 94:"UNMAPPED", 95:"UNMAPPED",
-96:"UNMAPPED", 97:"UNMAPPED", 98:"UNMAPPED", 99:"UNMAPPED", 100:"UNMAPPED",
-101:"UNMAPPED", 102:"UNMAPPED", 103:"UNMAPPED", 104:"NONE",    105:"UNMAPPED",
-106:"UNMAPPED", 107:"UNMAPPED", 108:"UNMAPPED", 109:"UNMAPPED", 110:"UNMAPPED",
-111:"UNMAPPED", 112:"Data Integration", 113:"UNMAPPED", 114:"UNMAPPED", 115:"UNMAPPED",
-116:"UNMAPPED", 117:"NONE",    118:"UNMAPPED", 119:"UNMAPPED", 120:"UNMAPPED",
-}
-# fmt: on
+# Assignments are keyed by SPAN ID, not sample index. An index-keyed table only
+# reproduces against the exact sample it was written from — and the corpus drifts
+# as work continues, so a re-run with the same seed picks different spans and an
+# index table would silently apply yesterday's labels to different work. Keyed by
+# id, a moved sample FAILS LOUDLY instead of lying.
+#
+# `ASSIGNMENTS` is a judgement pass, not a reproduction: it is one reader's
+# placement of spans into the declared catalog. Treat it as a measurement with
+# error, and read `--passes` for how far the number moves with the vocabulary.
+ASSIGNMENTS_FILE = Path(__file__).with_name("coverage_assignments.json")
+FALLBACK_FILE = Path(".out/assignments.json")
+
+# The catalog's domain axis, complete. A pass offering a subset of these cannot
+# report "domain X never appeared" — it can only report that it never asked.
+CATALOG_DOMAINS = (
+    "Data Integration", "Data Modeling", "Data Storage", "Data Quality",
+    "Data Governance", "Data Security", "Data Architecture", "Metadata",
+    "Analytics and BI", "Master Data", "ML and AI", "Orchestration",
+    "Platform", "Product", "Project Management",
+)
+
+
+def load_assignments(sample: dict) -> dict[str, str]:
+    """Load id -> domain, failing loudly if it does not match the sample."""
+    path = ASSIGNMENTS_FILE if ASSIGNMENTS_FILE.is_file() else FALLBACK_FILE
+    if not path.is_file():
+        raise SystemExit(
+            f"no assignments found at {ASSIGNMENTS_FILE} or {FALLBACK_FILE}. "
+            "A judgement pass cannot be inferred — it has to be recorded."
+        )
+    rec = json.loads(path.read_text(encoding="utf-8"))
+    table = rec["assignments"] if "assignments" in rec else rec
+    by_id = {v["id"] if isinstance(v, dict) else k: (v["domain"] if isinstance(v, dict) else v)
+             for k, v in table.items()}
+
+    ids = [s["id"] for s in sample["spans"]]
+    missing = [i for i in ids if i not in by_id]
+    if missing:
+        raise SystemExit(
+            f"{path} does not cover this sample: {len(missing)} of {len(ids)} span ids "
+            f"are unassigned (first: {missing[0]}). The corpus moved since the pass was "
+            "recorded, so these placements describe different spans. Re-judge, then "
+            "re-record. Refusing to apply stale labels."
+        )
+    return {i: by_id[i] for i in ids}
 
 # Which projects count as "data work" is USER-SPECIFIC and must not be hardcoded
 # in a public repo. It is supplied as a flat list, one project name per line, via
@@ -64,7 +82,6 @@ def load_data_projects(path: str | None, stamp: dict) -> set[str]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sample-file", default=".out/coverage_sample.json")
-    ap.add_argument("--list-unmapped", action="store_true")
     ap.add_argument("--data-projects",
                     help="file listing data-purpose project names, one per line")
     args = ap.parse_args()
@@ -77,9 +94,11 @@ def main() -> int:
               "data-vs-non-data split is skipped. This split is user-specific "
               "and is deliberately not hardcoded.\n")
 
+    assigned = load_assignments(data)
+
     rows = []
-    for i, s in enumerate(spans, 1):
-        rows.append({**s, "domain": D[i], "is_data_project": s["project"] in data_projects})
+    for s in spans:
+        rows.append({**s, "domain": assigned[s["id"]], "is_data_project": s["project"] in data_projects})
 
     def report(subset, label):
         n = len(subset)
@@ -98,18 +117,25 @@ def main() -> int:
             print(f"  domains seen: " + ", ".join(f"{k}×{v}" for k, v in c.most_common()))
 
     report(rows, "ALL sampled spans")
+    print("\n  by band — reply_only spans are the agent ANSWERING a question, so they")
+    print("  answer a different question from action spans and are reported apart:")
+    for b in ("reply_only", "small_1_3", "medium_4_10", "large_11_25", "very_large_26plus"):
+        sub = [r for r in rows if r.get("band") == b]
+        if sub:
+            placed = sum(1 for r in sub if r["domain"] not in ("UNMAPPED", "NONE"))
+            print(f"    {b:20s} n={len(sub):3d}  placed {placed:3d} ({placed/len(sub):5.1%})")
     if data_projects:
         report([r for r in rows if r["is_data_project"]], "Spans in DATA-purpose projects")
         report([r for r in rows if not r["is_data_project"]], "Spans in NON-data projects")
 
-    if args.list_unmapped:
-        print("\n--- UNMAPPED spans in data-purpose projects (the taxonomy's real gaps) ---")
-        for i, r in enumerate(rows, 1):
-            if r["is_data_project"] and r["domain"] == "UNMAPPED":
-                hint = (r["intents"][:3] if r["intents"] else [r["reply"][:110]])
-                print(f"\n[{i}] {r['project']} · {r['band']}")
-                for h in hint:
-                    print(f"    {h[:104]}")
+    unmapped_data = [r for r in rows if r["is_data_project"] and r["domain"] == "UNMAPPED"]
+    if unmapped_data:
+        print("\n--- UNMAPPED spans inside data-purpose projects (the taxonomy's real gaps) ---")
+        for r in unmapped_data:
+            hint = (r["intents"][:3] if r["intents"] else [r["reply"][:110]])
+            print(f"\n  {r['project']} · {r['band']}")
+            for h in hint:
+                print(f"      {h[:104]}")
     return 0
 
 
