@@ -9,15 +9,50 @@
 # Expect: ~2 min install, ~1-3 min fine-tune per fold.
 #
 # Rewritten for sentence-transformers v5 (5.x): the v4 recipes
-# (`losses.ContrastiveLoss` + `model.fit`) are deprecated and raise on 5.4.1.
-# This uses `SentenceTransformerTrainer` + `TripletLoss`, which is the current
-# API. Verified to run end to end locally before being handed over.
+# (`losses.ContrastiveLoss` + `model.fit`) are deprecated on 5.4.1 —
+# `ContrastiveLoss` still imports (with a DeprecationWarning) but the documented
+# v4 training path is superseded. This uses `SentenceTransformerTrainer` +
+# `TripletLoss`, which is the current API.
+#
+# VERIFICATION STATUS — read before trusting a number from this cell:
+#   confirmed  the API surface, by reading the installed 5.4.1 package source:
+#              SentenceTransformerTrainer / SentenceTransformerTrainingArguments
+#              are top-level exports; TripletLoss is at losses/triplet.py with
+#              ctor (model, distance_metric, margin); InputExample is exported.
+#   confirmed  the loop logic mirrors the tracer (same frame, same
+#              session_disjoint_folds, same nearest-centroid decision rule), so
+#              its macro-F1 is comparable to the CPU logistic head's.
+#   NOT run    the training loop has never executed end to end — every local
+#              attempt stalled on the torch/datasets install on this machine.
+#              The first Colab run is the first execution. If it fails, the
+#              failure is as likely to be the environment as this code.
+#   NOT a ceiling  the fixture cannot measure distillation (see the README), so
+#              compare this against the CPU head only as "does the arm run and
+#              roughly match", never as "encoder_ft is better/worse".
 
-import subprocess, sys, os, time, json
+import subprocess, sys, os, time, json, random
 
+# Install Colab-side. Deliberately does NOT reinstall torch: Colab ships a
+# CUDA-matched build, and a plain `pip install sentence-transformers` can pull a
+# CPU-only torch wheel that silently makes the L4 useless (training then runs on
+# CPU, ~20-60 min, and the wall-time print is the only clue). `--no-deps` for
+# torch is not enough (the resolver still upgrades), so instead we let pip see
+# what is already satisfied and re-assert the torch build afterwards.
 subprocess.run([sys.executable, "-m", "pip", "install", "-q",
                 "sentence-transformers>=5", "scikit-learn", "pandas", "pyyaml",
                 "datasets"], check=True)
+
+import torch
+print("torch", torch.__version__, "| cuda:", torch.cuda.is_available(),
+      "|", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU")
+if not torch.cuda.is_available():
+    print("\nCUDA IS NOT AVAILABLE. Either the runtime is not a GPU (set "
+          "Runtime > L4 GPU), or the install replaced Colab's CUDA torch with a "
+          "CPU wheel. Fix with:\n"
+          "    !pip install -q --force-reinstall torch --index-url "
+          "https://download.pytorch.org/whl/cu121\n"
+          "then Runtime > Restart session and re-paste.")
+    raise SystemExit(1)
 
 REPO = "https://github.com/evanokeefe39/agent-turn-classifier.git"
 if not os.path.isdir("/content/atc"):
@@ -67,17 +102,29 @@ for i, (tr, te) in enumerate(splits, 1):
     tr_df, te_df = frame.iloc[tr], frame.iloc[te]
     model = SentenceTransformer(ENCODER)
 
-    # Triplets: anchor, a same-class positive, a different-class negative.
+    # Triplets: anchor, a same-class positive, a random different-class negative.
+    #
+    # The first draft picked the negative from the ADJACENT label only
+    # (labels[(j+1) % n]) and always used pos_pool[0] as the positive. That
+    # contrasts each class against exactly one cyclic neighbour — 6 of 15
+    # possible pairs on a 6-class problem — and makes every positive for a class
+    # the same fixed example, which would understate the arm and risk rejecting
+    # encoder_ft for a sampling artefact. Seeded, so a re-run is reproducible.
+    rng = random.Random(20260922)
     by_label = {}
     for _, r in tr_df.iterrows():
         by_label.setdefault(r["label"], []).append(r["view"])
     labels = list(by_label)
     rows = []
-    for j, lab in enumerate(labels):
+    for lab in labels:
         pos_pool = by_label[lab]
-        neg_pool = by_label[labels[(j + 1) % len(labels)]]
+        other = [l for l in labels if l != lab]
+        if not other:
+            continue
         for a in pos_pool:
-            rows.append({"anchor": a, "positive": pos_pool[0], "negative": neg_pool[0]})
+            pos = rng.choice([v for v in pos_pool if v != a] or pos_pool)
+            neg = rng.choice(by_label[rng.choice(other)])
+            rows.append({"anchor": a, "positive": pos, "negative": neg})
     if not rows:
         continue
     ds = Dataset.from_list(rows)
@@ -85,7 +132,9 @@ for i, (tr, te) in enumerate(splits, 1):
     args = SentenceTransformerTrainingArguments(
         output_dir=f"/tmp/ft_{i}", num_train_epochs=4, per_device_train_batch_size=16,
         warmup_ratio=0.1, logging_steps=999, save_strategy="no", report_to=[],
-        fp16=torch.cuda.is_available(), disable_tqdm=True)
+        # bf16, not fp16: the L4 supports bf16 and fp16 can produce NaN loss on
+        # ModernBERT. Only enabled when CUDA is present.
+        bf16=torch.cuda.is_available(), disable_tqdm=True)
     SentenceTransformerTrainer(model=model, args=args, train_dataset=ds, loss=loss).train()
 
     # Classify by nearest class-centroid in the fine-tuned space.
