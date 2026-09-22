@@ -284,11 +284,38 @@ def majority(votes: list[dict]) -> dict:
 # The two reserved labels, which are NOT trainable classes and NOT scored.
 # They mean different things (P3) and are excluded for different reasons:
 #   `none`     — abstention: the turn is not work, so it has no path label.
+#                (A path macro-F1 is over `domain/workflow`; `none` has no
+#                domain, so it cannot be a class in that metric. The student
+#                predicting "not work" is measured by coverage, not path-F1.)
 #   `unmapped` — taxonomy gap: real work with no declared home; the discovery
 #                residue, teacher-only.
 # Keeping them in one constant is what guarantees the student and the teacher
 # are scored on the same turn population.
 RESERVED_NON_TRAINABLE = frozenset({"none", "unmapped"})
+
+
+def scoring_population(frame, teacher_labels: dict[str, str], truth: dict[str, str]):
+    """Return the turn ids that may be scored, in a stable order.
+
+    Pure function over the three inputs, so the invariant it encodes — the
+    student and the teacher see the SAME population — is testable without
+    fitting an encoder. `run_tracer` is its only production caller.
+
+    Raises if a turn has a teacher label but no ground truth: that turn could
+    be scored by one side and silently dropped by the other, which is exactly
+    how a ceiling gap drifts.
+    """
+    ids = list(frame["turn_id"])  # list, not set: iteration order must be stable
+    missing = [tid for tid in ids if tid not in truth]
+    if missing:
+        raise ValueError(f"{len(missing)} scored turns have no ground truth: {missing[:3]}")
+    for tid in ids:
+        if teacher_labels.get(tid) in RESERVED_NON_TRAINABLE:
+            raise ValueError(
+                f"turn {tid!r} carries reserved label {teacher_labels[tid]!r} "
+                "but reached the scoring population"
+            )
+    return ids
 
 
 def build_frame(turns: list[Turn], views: dict[str, str], labels: dict[str, str]):
@@ -460,18 +487,21 @@ def run_tracer(
     for tr, te in splits:
         model = fit_linear(frame.iloc[tr]["view"], frame.iloc[tr]["label"], encoder)
         preds = predict_linear(model, frame.iloc[te]["view"])
-        y_true.extend(frame.iloc[te]["label"])
+        # Score against GROUND TRUTH, not against `frame["label"]`.
+        #
+        # frame["label"] is the teacher's own output (the student trains on it),
+        # so scoring the student against it measures only "does the student
+        # reproduce its teacher" — an identity a fit model satisfies by
+        # construction. `ceiling_gap` computed that way can never detect
+        # distillation failure. The student must be judged on held-out truth.
+        y_true.extend(truth[tid] for tid in frame.iloc[te]["turn_id"])
         y_pred.extend(preds)
 
-    # The teacher must be scored on EXACTLY the population the student is
-    # scored on. `frame` already dropped `unmapped` rows (they are a
-    # teacher-only discovery class, never predicted), so restricting the
-    # teacher/truth lists to the frame's turn ids is what makes the two
-    # macro-F1s comparable — and what makes `ceiling_gap` a subtraction of
-    # like from like. Scoring the teacher over all labelled turns instead
-    # silently mixes populations: invisible at unmapped_rate=0.0, wrong the
-    # moment the teacher abstains on anything.
-    scored_ids = list(frame["turn_id"])  # list, not set: iteration order must be stable
+    # Both scorers see EXACTLY the same turn population, enforced by a pure
+    # helper so the invariant is testable without fitting an encoder. It reads
+    # the RAW teacher labels — reserved values must still be recognisable as
+    # reserved at this point, which the path form would have erased.
+    scored_ids = scoring_population(frame, teacher_labels, truth)
     teacher_paths = [teacher_path_labels[tid] for tid in scored_ids]
     truth_paths = [truth[tid] for tid in scored_ids]
 
@@ -486,26 +516,30 @@ def run_tracer(
     # figure with turns that were never work in the first place.
     n_none = sum(1 for v in teacher_labels.values() if v == "none")
     n_unmapped = sum(1 for v in teacher_labels.values() if v == "unmapped")
-    n_work = max(1, len(teacher_labels) - n_none)
+    n_work = len(teacher_labels) - n_none  # never clamped: the field must report the truth
 
     return {
         "n_turns": len(turns),
         "n_sessions": frame["session_id"].nunique(),
-        # Three populations, named so they cannot be confused:
-        #   n_teacher_labelled — every turn the teacher gave a verdict on
-        #   n_none             — of those, not work (abstention)
-        #   n_scored           — of those, trainable and scored (the intersection
-        #                        of a teacher label and known ground truth)
+        # Population accounting. These four satisfy an identity over the turn
+        # set, which the notebook asserts:
+        #   n_teacher_labelled == n_none + n_unmapped + n_scored
+        #     n_teacher_labelled — every turn the teacher gave a verdict on
+        #     n_none             — of those, not work (abstention)
+        #     n_unmapped         — of those, work with no declared home (gap)
+        #     n_scored           — of those, trainable and scored
         "n_teacher_labelled": len(teacher_labels),
         "n_none": n_none,
         "n_unmapped": n_unmapped,
-        "n_work": len(teacher_labels) - n_none,
+        "n_work": n_work,
         "n_scored": len(scored_ids),
         "n_classes": frame["label"].nunique(),
         # Taxonomy coverage: the share of WORK turns the taxonomy could name.
-        # `none` is excluded from the denominator — abstaining on a turn that
-        # is not work is correct behaviour, not a coverage gap.
-        "unmapped_rate": round(n_unmapped / n_work, 3),
+        # Numerator is `unmapped` alone. `none` is excluded from the denominator
+        # because abstaining on a turn that is not work is correct behaviour,
+        # not a coverage gap — merging the two inflates this figure with turns
+        # that were never work.
+        "unmapped_rate": round(n_unmapped / n_work, 3) if n_work else 0.0,
         "student_path_macro_f1": round(student_f1, 3),
         "teacher_path_macro_f1": round(teacher_f1, 3),
         "ceiling_gap": round(teacher_f1 - student_f1, 3),

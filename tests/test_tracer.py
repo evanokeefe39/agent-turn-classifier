@@ -117,18 +117,15 @@ def test_build_turns_segments_on_user_records():
     assert any(t.actions for t in turns)
 
 
-def test_teacher_and_student_score_the_same_population():
-    """The teacher and student must be scored on the SAME turn population.
+def test_scoring_population_is_shared_and_excludes_reserved():
+    """The student and teacher must be scored on the SAME turn population.
 
-    `frame` drops `unmapped` rows (a teacher-only discovery class the student
-    never predicts). If the teacher is scored over all labelled turns instead,
-    the two macro-F1s describe different populations and `ceiling_gap` is
-    meaningless — silently, because at unmapped_rate=0.0 the populations are
-    identical. The real bug: a teacher abstaining on some turns made the
-    teacher's denominator strictly larger than the student's.
+    Calls the pure helper `run_tracer` uses, so this cannot pass while the
+    production path diverges — and needs no encoder, so it stays fast.
 
-    This checks the invariant without loading an encoder, so it stays in the
-    fast suite.
+    The bug it guards: the teacher was once scored over all labelled turns
+    while the student was scored over the frame, so `ceiling_gap` subtracted
+    across two different populations. Silent at unmapped_rate=0.0.
     """
     import json as _json
     from pathlib import Path as _Path
@@ -149,22 +146,32 @@ def test_teacher_and_student_score_the_same_population():
         if l.strip()
     }
 
-    # The fixture must exercise the bug's precondition: turns excluded from the
-    # training frame. These are `none` turns here — the mock teacher always has
-    # an answer, so it never emits `unmapped`, and `none` is what makes the
-    # frame's population smaller than the labelled one.
-    frame_ids = [
-        t.turn_id
-        for t in turns
-        if teacher_labels[t.turn_id] not in T.RESERVED_NON_TRAINABLE
-    ]
-    assert len(frame_ids) < len(turns), (
-        "fixture has no reserved-label turns — the denominator bug is undetectable here"
+    # The fixture MUST exercise the precondition, or the bug is undetectable.
+    n_reserved = sum(1 for v in teacher_labels.values() if v in T.RESERVED_NON_TRAINABLE)
+    assert n_reserved > 0, (
+        "fixture has no reserved-label turns — this test cannot detect the "
+        "denominator bug it exists to guard"
     )
 
-    # Every turn the student could be scored on must also have ground truth, so
-    # neither side can silently drop a row the other kept.
-    assert all(tid in truth for tid in frame_ids), "a scored turn has no truth label"
+    frame = T.build_frame(turns, views, teacher_labels)
+    ids = T.scoring_population(frame, teacher_labels, truth)
+
+    # The scored set is strictly smaller than the labelled set, and contains no
+    # reserved label.
+    assert len(ids) < len(teacher_labels)
+    assert not [tid for tid in ids if teacher_labels[tid] in T.RESERVED_NON_TRAINABLE]
+    # Every scored turn has ground truth, so neither side can drop a row.
+    assert all(tid in truth for tid in ids)
+
+
+def test_scoring_population_rejects_a_turn_without_truth():
+    """A teacher label with no ground truth must raise, not be silently dropped."""
+    turns = T.build_turns(T.read_canonical(EX / "sessions.sample.jsonl"))
+    views = {t.turn_id: T.render(t) for t in turns}
+    labels = {t.turn_id: "W1" for t in turns}
+    frame = T.build_frame(turns, views, labels)
+    with pytest.raises(ValueError, match="no ground truth"):
+        T.scoring_population(frame, labels, truth={})
 
 
 @pytest.mark.slow

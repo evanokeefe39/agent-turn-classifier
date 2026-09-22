@@ -30,33 +30,40 @@ What exists now is `notebooks/00_tracer.ipynb` and the `tracer.py` module behind
 it. It runs the full chain on a **synthetic** 84-turn corpus, on a free Colab
 **CPU** runtime, with **no API key** and no GPU.
 
-### What it measured
+### What it measured — and what it does NOT measure
 
-| corpus | turns | sessions | classes | student macro-F1 | teacher (ceiling) | **ceiling gap** |
+The synthetic fixture is templated, so held-out turns are **near-duplicates of
+training turns**: mean nearest-neighbour cosine 0.932, with 23 of 72 turns
+having a >0.95 neighbour. Session-disjoint folds do not prevent this, because
+the *text* repeats across sessions, not just within them.
+
+| corpus | turns | sessions | classes | student macro-F1 | teacher macro-F1 | gap |
 |---|---|---|---|---|---|---|
-| first cut | 17 | 5 | 6 | 0.056 | 0.752 | **0.697** |
-| after scaling | 84 | 12 | 6 | 0.708 | 0.708 | **0.000** |
+| first cut | 17 | 5 | 6 | 0.056 | 0.752 | +0.697 |
+| scaled | 84 | 12 | 6 | 0.982 | 0.708 | **−0.274** |
 
-Both runs are on the synthetic corpus with a mock teacher; `teacher_path_macro_f1`
-is the ceiling a student cannot beat.
+**Both rows are misleading, for different reasons.**
 
-The first row is the finding worth keeping. At 17 turns the student scored
-barely above chance while its teacher scored 0.752 — a 0.697 gap, far outside
-the ship rule's `--max-gap-to-ceiling` (0.10). The cause was **corpus density,
-not the method**: `GroupKFold(3)` over 5 sessions left each fold training on
-~11 examples for 6 classes, which the plan's own `--min-class-support` (8) would
-have rejected outright. Scaling the fixture to 84 turns across 12 sessions
-closed the gap without changing the model.
+The first was corpus density: `GroupKFold(3)` over 5 sessions left ~11 training
+examples for 6 classes, which the design's own `--min-class-support` (8)
+rejects. Real as a lesson, but it measured the fixture's poverty.
 
-The `0.000` gap is a **coincidence, not a perfect score** — the teacher is wrong
-on 19 of 72 scored turns, and the student's different error pattern happens to
-land on the same macro-F1. Do not read it as evidence the student matches the
-teacher.
+The second is worse, and it is a **negative gap** — the student appears to beat
+its ceiling, which should be impossible. It isn't impossible here: it is
+near-duplicate leakage. The student memorises the templated surface forms, so a
+held-out turn is answered by matching a near-identical training turn. Measured
+honestly with leave-one-out (train on 71, test on 1), the same student scores
+**0.722**, not 0.982.
 
-**Correctness caveat.** The corpus is synthetic and the teacher is a mock, so
-none of these numbers say anything about real sessions. They calibrate one
-thing: the corpus needs tens of examples per class before the student's score
-means anything.
+**There is no real ceiling measurement in this tracer.** The mock teacher reads
+`canned_labels.jsonl`, so `teacher_path_macro_f1` (0.708) is just
+`1 − injected_error_rate` (19/72 ≈ 26%) — it is a property of the fixture, not a
+bound on what the student can achieve. A ceiling requires a real teacher and a
+gold set, which is the real run.
+
+Each metric is asserted to be computed over the *same* turn population as its
+counterpart, which is the one property the tracer does prove: the units are
+right even when the numbers are not informative.
 
 
 | Included in the tracer | Deferred to the real build |
