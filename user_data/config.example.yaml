@@ -26,6 +26,16 @@ ontology:
   # It starts empty: extensions are produced BY `atc discover`, never seeded up front.
   overlay: user_data/ontology.overlay.example.yaml
 
+# Corpus scoping — USER-SPECIFIC, so it lives here and never in committed code.
+corpus:
+  # Project directories to skip entirely (exact names, as they appear under the
+  # sessions root). Use for personal or off-topic corpora.
+  exclude_projects: []
+  # Projects whose purpose IS data work, one name per line in a separate file.
+  # Used by `examples/coverage_assign.py` for the data-vs-non-data coverage
+  # split. Left empty means the split is skipped rather than guessed.
+  data_projects_file: null
+
 # Time windows, half-open ISO ranges. Buckets your turns for the coverage report.
 windows:
   - {name: all, start: 2026-01-01T00:00:00+02, end: 2027-01-01T00:00:00+02}
